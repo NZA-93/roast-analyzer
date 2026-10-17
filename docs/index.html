@@ -19,7 +19,7 @@
   <input id="files" type="file" accept="image/*" multiple hidden>
   <button class="btn" id="demo">Load demo batch (17 Oct 2026, 4 samples)</button>
   <button class="btn ghost" id="clear" hidden>Clear</button>
-  <p class="hint">Tips: one layer of beans on a plain white plate, daylight or one even light, no flash, phone straight above. Add several photos of the same batch — they are merged into one report.</p>
+  <p class="hint">Tips: one layer of beans on a plain white plate, your fixed LED light in the same position, colour card in frame, locked exposure, white balance and focus, no HDR or flash, camera straight above. Full setup: <a href="https://github.com/NZA-93/roast-analyzer/blob/main/docs/CALIBRATION.md">docs/CALIBRATION.md</a>. Add several photos of the same batch — they are merged into one report.</p>
   <div id="status" role="status" aria-live="polite"></div>
 </section>
 
@@ -32,7 +32,8 @@
     <div class="overlay-wrap"><canvas id="photo"></canvas></div>
     <div class="legend" id="legend"></div>
     <label class="toggle"><input type="checkbox" id="showOverlay" checked> Show bean overlay</label> <button class="btn ghost" id="zoom" aria-pressed="false">🔍 Zoom 2×</button>
-    <button class="btn" id="testToggle" aria-pressed="false" hidden>🧪 Test detection</button>
+    <button class="btn primary big" id="swipeStart" hidden>👆 Check the detector (20 quick swipes)</button>
+    <button class="btn ghost" id="testToggle" aria-pressed="false" hidden>🧪 Advanced: mark by hand</button>
     <div id="tester" class="tester" hidden>
       <p class="muted">Correct the detector on this photo. Your corrections become ground truth: they give the scores below, are saved on this device, and when submitted they retune the detector for everyone.</p>
       <div class="tools" id="tools" role="toolbar" aria-label="Correction tool"></div>
@@ -117,6 +118,43 @@
   </details>
   <p class="muted"><a href="https://github.com/NZA-93/roast-analyzer">Source on GitHub</a> · <a href="reports/2026-10-17.json">Reference report 2026-10-17 (JSON)</a></p>
 </section>
+<div id="swipe" class="swipe" hidden role="dialog" aria-modal="true" aria-label="Bean check">
+  <div class="swtop">
+    <button id="swUndo" class="swicon" aria-label="Undo last card" disabled>↶</button>
+    <div class="swprog"><b id="swProgress">1/20</b><div class="swtrack"><div id="swBar"></div></div></div>
+    <button id="swClose" class="swicon" aria-label="Close">✕</button>
+  </div>
+  <div id="deck" class="deck">
+    <p class="swhelp">Is the ringed thing <b>one whole bean</b> with a believable colour?</p>
+    <div id="card" class="swcard"><div id="tint" class="tint"></div></div>
+  </div>
+  <div id="chips" class="chips" hidden>
+    <div class="chiprow">
+      <button data-r="not-bean">Not a bean</button>
+      <button data-r="two-beans" id="chipTwo">Two beans</button>
+      <button data-r="part-of-bean">Part of bean</button>
+      <button data-r="wrong-colour">Wrong colour</button>
+    </div>
+    <div id="mergeMore" class="chiprow" hidden><button data-r="two-beans" data-n="3">3 beans</button><button data-r="two-beans" data-n="4+">4+ beans</button></div>
+    <div class="chipcount"><div id="chipBar"></div></div>
+  </div>
+  <div id="swButtons" class="swbtns">
+    <button id="btnLeft" class="sw no" aria-label="Wrong">✕</button>
+    <button id="btnUp" class="sw skip" aria-label="Skip">↑<small>skip</small></button>
+    <button id="btnRight" class="sw yes" aria-label="Correct">✓</button>
+  </div>
+  <div id="gaps" class="gaps" hidden>
+    <p class="swhelp">Tap any bean <b>without</b> a dark dot on it. Tap again to remove.</p>
+    <div class="gapwrap"><canvas id="gapCanvas"></canvas></div>
+    <div class="row"><button id="gapZoom" class="btn big">🔍 Zoom</button><button id="gapsDone" class="btn primary big">None ✓</button></div>
+  </div>
+  <div id="done" class="done" hidden>
+    <p id="doneMsg" class="donemsg"></p>
+    <button id="swAgain" class="btn primary big">20 more</button>
+    <button id="swDoneClose" class="btn">Back to report</button>
+    <button id="swExport" class="btn ghost">Export answers</button>
+  </div>
+</div>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

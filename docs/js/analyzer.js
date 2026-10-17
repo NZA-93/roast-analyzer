@@ -235,10 +235,13 @@ export function analyzeImage(img, opts = {}) {
     const why = Cm < (opts.minBeanC ?? 0.55) * cthr ? 'shadow/gap' : Lm > thr + 6 && Cm < cthr ? 'plate glare' : null;
     if (why) { rejected.push({ x: cx0, y: cy0, area: a, reason: why }); continue; }
     const ag = agtronFromL(Lm, cal);
+    // review helpers: glare = share of bright low-chroma (specular/plate) pixels; conf = margin from the reject rules and typical size
+    const glare = +(src.filter(i => L[i] > hi - 3 && Math.hypot(A[i], B[i]) < 10).length / src.length).toFixed(3);
+    const conf = +Math.max(0, Math.min(1, (Cm - (opts.minBeanC ?? 0.55) * cthr) / cthr, 1 - Math.abs(Math.log(a / medA)) / Math.log(3))).toFixed(3);
     keep[l] = beans.length + 1;
     beans.push({ id: beans.length + 1, x: +cx.toFixed(1), y: +cy.toFixed(1), area: a, bbox: [minx[l], miny[l], maxx[l], maxy[l]],
       L: +Lm.toFixed(2), a: +am.toFixed(2), b: +bm.toFixed(2), C: +Math.hypot(am, bm).toFixed(2), hue: +(Math.atan2(bm, am) * 180 / Math.PI).toFixed(1),
-      agtron: +ag.toFixed(1), band: BANDS[bandOf(ag)].name });
+      agtron: +ag.toFixed(1), band: BANDS[bandOf(ag)].name, glare, conf, sizeRatio: +(a / medA).toFixed(3) });
   }
   // Spatial detrend: beans are spread at random, so any linear trend of bean colour with position is lighting
   // (light from one side, the phone's shadow), not roast. Remove the planar trend, keep the mean.

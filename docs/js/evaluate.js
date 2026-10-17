@@ -23,7 +23,10 @@ export function buildTruth(detections, corr, R) {
   return truth;
 }
 
-const inRoi = (p, roi) => !roi || (p.x >= roi[0] && p.x < roi[2] && p.y >= roi[1] && p.y < roi[3]);
+// roi is either a rectangle [x0,y0,x1,y1] or a point scope {points:[[x,y],...], r} (swipe review: only the beans
+// that were actually shown, plus the missed beans tapped on the gaps screen, count).
+const inRoi = (p, roi) => { if (!roi) return true; if (Array.isArray(roi)) return p.x >= roi[0] && p.x < roi[2] && p.y >= roi[1] && p.y < roi[3];
+  const r2 = (roi.r || 3) ** 2; return roi.points.some(q => (q[0] - p.x) ** 2 + (q[1] - p.y) ** 2 <= r2); };
 
 // Greedy one-to-one matching of truth points to detections within matchK * R (merged groups get a wider radius).
 export function score(truth, detections, R, roi = null, matchK = 1.0) {

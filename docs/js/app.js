@@ -1,5 +1,6 @@
 import { BANDS, DEFAULT_CAL, agtronFromL, bandOf, batchReport, ALGO_VERSION } from './analyzer.js';
 import { tester } from './tester.js';
+import * as swipe from './swipe.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX = 1600;
@@ -72,7 +73,7 @@ function render() {
   $('summary').innerHTML = cards.map(([k, v, s, cls]) => `<div class="card ${cls || ''}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
   $('tabs').innerHTML = state.samples.map((s, i) => `<button role="tab" aria-selected="${i === state.current}" data-i="${i}">${i + 1}. ${esc(s.name)} · ${s.beans.length}</button>`).join('');
   $('legend').innerHTML = BANDS.map(b => `<span><i class="sw" style="background:${b.color}"></i>${b.name}</span>`).join('') + '<span><i class="sw" style="background:#888;border:2px solid #fff;outline:1px solid #888"></i>outlier (white outline)</span>';
-  drawPhoto(); drawMap(); drawHist(); drawTable(); drawOutliers(); calUI(); tester.update();
+  drawPhoto(); drawMap(); drawHist(); drawTable(); drawOutliers(); calUI(); tester.update(); swipe.update();
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -207,8 +208,9 @@ let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTime
 if (new URLSearchParams(location.search).has('demo')) $('demo').click();
 calUI();
 tester.init({ state, drawPhoto, status, version: () => state.detector?.version || ALGO_VERSION + '.0' });
+swipe.init({ state, version: () => state.detector?.version || ALGO_VERSION + '.0' });
 function showDetector() { const d = state.detector, el = $('detector'); if (!el) return;
   if (!d) { el.innerHTML = `Detector ${ALGO_VERSION} (default parameters)`; return; }
   const b = d.benchmark || {};
-  el.innerHTML = `<b>Detector v${d.version}</b> · benchmark F1 <b>${b.f1}</b> (precision ${b.precision}, recall ${b.recall}) on ${b.truthBeans} hand-checked beans in ${b.images} photo${b.images > 1 ? 's' : ''} · tuned ${d.date}`;
+  el.innerHTML = `<b>Detector v${d.version}</b> · benchmark F1 <b>${b.f1}</b> (precision ${b.precision}, recall ${b.recall}) on ${b.truthBeans} beans of the seed tile (one annotator, started from detector output — not an independent test yet) · tuned ${d.date}`;
   fetch('changelog.json', { cache: 'no-cache' }).then(r => r.json()).then(cl => { $('changelog').innerHTML = cl.slice(0, 6).map(c => `<li><b>${esc(c.version)}</b> (${esc(c.date)}): ${esc(c.text)}</li>`).join(''); }).catch(() => {}); }
