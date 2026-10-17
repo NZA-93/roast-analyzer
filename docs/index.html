@@ -11,7 +11,7 @@
 <body>
 <header>
   <h1>☕ Roast Analyzer</h1>
-  <p class="sub">Photograph roasted beans on a white plate. Every bean is found, colour-measured and placed on a roast map. Runs 100% in your browser; photos never leave your device.</p>
+  <p class="sub">Photograph roasted beans on a white plate. Every bean is found, colour-measured and placed on a roast map. Runs 100% in your browser; photos stay on your device unless you send feedback.</p>
 </header>
 
 <section class="actions">
@@ -144,12 +144,13 @@
     <button id="btnRight" class="sw yes" aria-label="Correct">✓</button>
   </div>
   <div id="gaps" class="gaps" hidden>
-    <p class="swhelp">Tap any bean <b>without</b> a dark dot on it. Tap again to remove.</p>
+    <p class="swhelp">Tap any bean <b>without</b> a dark dot. Tap again to remove.</p>
     <div class="gapwrap"><canvas id="gapCanvas"></canvas></div>
-    <div class="row"><button id="gapZoom" class="btn big">🔍 Zoom</button><button id="gapsDone" class="btn primary big">None ✓</button></div>
+    <button id="gapsDone" class="btn primary big">None ✓</button>
   </div>
   <div id="done" class="done" hidden>
     <p id="doneMsg" class="donemsg"></p>
+    <label id="photoToggle" class="phototoggle" hidden><input type="checkbox" id="sendPhoto" checked> Send photo with answers</label>
     <button id="swAgain" class="btn primary big">20 more</button>
     <button id="swDoneClose" class="btn">Back to report</button>
     <button id="swExport" class="btn ghost">Export answers</button>

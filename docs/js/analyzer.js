@@ -252,7 +252,7 @@ export function analyzeImage(img, opts = {}) {
       for (let r = 0; r < 3; r++) { for (let c = 0; c < 3; c++) S[r][c] += v[r] * v[c]; for (let k = 0; k < 3; k++) T[k][r] += v[r] * y[k]; } }
     const solve = (M, y) => { const m = M.map((r, i) => [...r, y[i]]); for (let i = 0; i < 3; i++) { for (let k = 0; k < 3; k++) if (k !== i) { const f = m[k][i] / m[i][i]; for (let c = i; c < 4; c++) m[k][c] -= f * m[i][c]; } } return m.map((r, i) => r[3] / r[i]); };
     const co = T.map(t => solve(S, t)); const mx = beans.reduce((s, b) => s + (b.x - w / 2) / sc, 0) / beans.length, my = beans.reduce((s, b) => s + (b.y - h / 2) / sc, 0) / beans.length;
-    for (const bn of beans) { const dx = (bn.x - w / 2) / sc - mx, dy = (bn.y - h / 2) / sc - my; bn.Lraw = bn.L;
+    for (const bn of beans) { const dx = (bn.x - w / 2) / sc - mx, dy = (bn.y - h / 2) / sc - my; bn.Lraw = bn.L; bn.araw = bn.a; bn.braw = bn.b;
       bn.L = +(bn.L - co[0][1] * dx - co[0][2] * dy).toFixed(2); bn.a = +(bn.a - co[1][1] * dx - co[1][2] * dy).toFixed(2); bn.b = +(bn.b - co[2][1] * dx - co[2][2] * dy).toFixed(2);
       bn.C = +Math.hypot(bn.a, bn.b).toFixed(2); bn.hue = +(Math.atan2(bn.b, bn.a) * 180 / Math.PI).toFixed(1); bn.agtron = +agtronFromL(bn.L, cal).toFixed(1); bn.band = BANDS[bandOf(bn.agtron)].name; }
     trend = { dLdx: +co[0][1].toFixed(2), dLdy: +co[0][2].toFixed(2) }; }

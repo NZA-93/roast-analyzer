@@ -1,18 +1,53 @@
-// Worker smoke test with a mocked GitHub API: valid batch -> 201 + 3 files; junk -> 400; oversize -> 413; rate limit -> 429.
+// Worker tests with a mocked GitHub API.
 import assert from 'assert/strict';
-import worker from '../worker/index.js';
-import { makeRecord, BATCH_SCHEMA } from '../docs/js/swipe-core.js';
-const puts = []; globalThis.fetch = async (url, init) => { puts.push({ url, body: JSON.parse(init.body) }); return new Response('{}', { status: 201 }); };
-const kv = new Map(); const env = { GITHUB_TOKEN: 'x', RATE: { get: async k => kv.get(k), put: async (k, v) => kv.set(k, v) } };
-const image = { name: 'a.jpg', sha256: 'b'.repeat(64), width: 100, height: 100 };
-const bean = { id: 1, x: 10, y: 10, L: 40, glare: 0 };
-const batch = { schema: BATCH_SCHEMA, id: 'abcdef-123', createdAt: '2026-10-17T10:00:00Z', image, beanRadius: 5, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', params: {},
-  answers: [makeRecord({ image, bean, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', answer: 'correct', pick: 'random', R: 5 })], missed: [{ x: 50, y: 50 }] };
-const post = (b, h = {}) => worker.fetch(new Request('https://w.example/batch', { method: 'POST', headers: { origin: 'https://nza-93.github.io', 'cf-connecting-ip': '1.2.3.4', ...h }, body: typeof b === 'string' ? b : JSON.stringify(b) }), env);
-let r = await post(batch); assert.equal(r.status, 201); assert.equal(puts.length, 2); // raw + random (no targeted answers)
-assert.ok(puts[0].url.includes('/contents/feedback/swipe/raw/')); assert.ok(puts[1].url.endsWith('-random.json'));
-assert.equal((await post({ ...batch, answers: [{ ...batch.answers[0], answer: 'band:Dark' }] })).status, 400);
-assert.equal((await post('x'.repeat(70000))).status, 413);
-assert.equal((await post(batch, { origin: 'https://evil.example' })).status, 403);
-for (let i = 0; i < 30; i++) await post({ ...batch, answers: [] }); assert.equal((await post(batch)).status, 429);
-console.log('worker tests passed');
+import worker, { MAX_PER_HOUR } from '../worker/index.js';
+import { makeRecord, BATCH_SCHEMA, KNOWN_IMAGES } from '../docs/js/swipe-core.js';
+let n = 0; const t = async (name, fn) => { await fn(); n++; console.log('ok -', name); };
+
+// --- fake GitHub: refs, contents, pulls ---
+let gh; const resetGH = () => { gh = { refs: { main: 'sha-main' }, files: {}, prs: [], calls: [] }; };
+globalThis.fetch = async (url, init = {}) => {
+  const u = new URL(url), p = u.pathname.replace('/repos/NZA-93/roast-analyzer', ''), m = init.method || 'GET', body = init.body ? JSON.parse(init.body) : null;
+  gh.calls.push(`${m} ${p}`); const J = (s, j) => new Response(JSON.stringify(j), { status: s });
+  let r;
+  if (r = p.match(/^\/git\/ref\/heads\/(.+)$/)) return gh.refs[r[1]] ? J(200, { object: { sha: gh.refs[r[1]] } }) : J(404, {});
+  if (p === '/git/refs' && m === 'POST') { gh.refs[body.ref.replace('refs/heads/', '')] = body.sha; return J(201, {}); }
+  if (r = p.match(/^\/contents\/(.+)$/)) { const key = `${m === 'PUT' ? body.branch : u.searchParams.get('ref')}:${r[1]}`;
+    if (m === 'GET') return gh.files[key] ? J(200, {}) : J(404, {}); if (gh.files[key]) return J(422, {}); gh.files[key] = body.content; return J(201, {}); }
+  if (p === '/pulls' && m === 'GET') return J(200, gh.prs.filter(x => `NZA-93:${x.head}` === u.searchParams.get('head')));
+  if (p === '/pulls' && m === 'POST') { const pr = { head: body.head, base: body.base, html_url: `https://github.com/NZA-93/roast-analyzer/pull/${10 + gh.prs.length}` }; gh.prs.push(pr); return J(201, pr); }
+  return J(500, { p });
+};
+const mkKV = () => { const kv = new Map(); return { get: async k => kv.get(k), put: async (k, v) => kv.set(k, v) }; };
+const env0 = () => ({ GITHUB_TOKEN: 'x', RATE: mkKV() });
+const ORIGIN = 'https://nza-93.github.io';
+const mk = (sha, extra = {}) => { const image = { name: 'a.jpg', sha256: sha, width: 100, height: 100 }, bean = { id: 1, x: 10, y: 10, L: 40, a: 8, b: 20, glare: 0 };
+  return { schema: BATCH_SCHEMA, id: 'abcdef-123', createdAt: '2026-10-17T10:00:00Z', image, beanRadius: 5, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', params: {}, detectionsOnPlate: 50,
+    colourPipelineVersion: 'wbplane-1+srgb-tone-1', wbGains: [1, 1, 1], gapTiles: [{ rect: [0, 0, 50, 50], gapArea: 100, missed: 1 }], totalGapArea: 400,
+    answers: [makeRecord({ image, bean, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', answer: 'correct', pick: 'random', R: 5 })], missed: [{ x: 30, y: 30 }], ...extra }; };
+const post = (env, b, h = { origin: ORIGIN }) => worker.fetch(new Request('https://w.example/batch', { method: 'POST', headers: { 'cf-connecting-ip': '1.2.3.4', ...h }, body: typeof b === 'string' ? b : JSON.stringify(b) }), env);
+const known = KNOWN_IMAGES[0], unknown = 'e'.repeat(64);
+
+await t('valid batch on a known photo -> branch + files under feedback/swipe/ + PR (never main)', async () => { resetGH(); const env = env0();
+  const r = await post(env, mk(known)); const j = await r.json(); assert.equal(r.status, 201, JSON.stringify(j));
+  assert.ok(gh.refs['swipe-feedback'], 'branch created'); assert.ok(j.files.every(f => f.startsWith('feedback/swipe/')));
+  assert.ok(Object.keys(gh.files).every(k => k.startsWith('swipe-feedback:')), 'nothing written to main');
+  assert.equal(gh.prs.length, 1); assert.equal(j.pr, gh.prs[0].html_url);
+  const r2 = await post(env, mk(known, { id: 'second-batch', answers: [{ ...mk(known).answers[0], answer: 'skip' }] })); assert.equal(r2.status, 201); assert.equal(gh.prs.length, 1, 'PR reused'); });
+await t('Origin required', async () => { resetGH(); assert.equal((await post(env0(), mk(known), {})).status, 403); assert.equal((await post(env0(), mk(known), { origin: 'https://evil.example' })).status, 403); });
+await t('rate limit is mandatory and enforced', async () => { resetGH();
+  assert.equal((await post({ GITHUB_TOKEN: 'x' }, mk(known))).status, 503);
+  const env = env0(); for (let i = 0; i < MAX_PER_HOUR; i++) await post(env, { junk: 1 }); assert.equal((await post(env, mk(known))).status, 429); });
+await t('unknown photo without image -> 422 with a clear message', async () => { resetGH(); const r = await post(env0(), mk(unknown)); assert.equal(r.status, 422); assert.match((await r.json()).detail, /send it with the answers/); });
+await t('unknown photo with image -> photo stored, GT points at it', async () => { resetGH();
+  const r = await post(env0(), mk(unknown, { photo: 'data:image/jpeg;base64,' + Buffer.from('fakejpeg').toString('base64') })); const j = await r.json(); assert.equal(r.status, 201);
+  const img = j.files.find(f => f.startsWith('feedback/images/')); assert.ok(img);
+  const gt = JSON.parse(Buffer.from(gh.files[`swipe-feedback:${j.files.find(f => f.endsWith('-random.json'))}`], 'base64').toString()); assert.equal(gt.image.path, img);
+  const raw = JSON.parse(Buffer.from(gh.files[`swipe-feedback:${j.files.find(f => f.includes('/raw/'))}`], 'base64').toString()); assert.equal(raw.photo, undefined, 'photo not duplicated in raw JSON'); });
+await t('dedupe by content hash (same answers, new id) -> 409', async () => { resetGH(); const env = env0();
+  assert.equal((await post(env, mk(known))).status, 201); assert.equal((await post(env, mk(known, { id: 'resent-copy', createdAt: '2026-10-17T10:00:09Z' }))).status, 409); });
+await t('schema, nulls and size are rejected', async () => { resetGH();
+  assert.equal((await post(env0(), mk(known, { answers: [{ ...mk(known).answers[0], rawA: null }] }))).status, 400);
+  assert.equal((await post(env0(), mk(known, { answers: [{ ...mk(known).answers[0], answer: 'band:Dark' }] }))).status, 400);
+  assert.equal((await post(env0(), 'x'.repeat(2e6))).status, 413); });
+console.log(`\n${n} worker tests passed`);

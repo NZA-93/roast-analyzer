@@ -30,23 +30,47 @@ function resizeTo(img, W, H) { if (img.width === W && img.height === H) return i
 
 // ---------- ground truth ----------
 const FB = FEEDBACK || P('feedback');
-const gtFiles = fs.existsSync(FB) ? fs.readdirSync(FB).filter(f => f.endsWith('.json')).sort() : [];
+// top-level feedback/*.json plus swipe-review files in feedback/swipe/*.json (raw batches in feedback/swipe/raw/ are not ground truth)
+const listJSON = d => fs.existsSync(d) ? fs.readdirSync(d).filter(f => f.endsWith('.json')).sort() : [];
+const gtFiles = [...listJSON(FB), ...listJSON(path.join(FB, 'swipe')).map(f => path.join('swipe', f))];
+let skippedBiased = 0;
 const sets = [];
 for (const f of gtFiles) { const j = readJSON(path.join(FB, f)); if (!j || j.schema !== GT_SCHEMA) { console.warn(`skip ${f}: not a ground-truth file`); continue; }
+  if (j.source?.biased) { skippedBiased++; console.log(`skip ${f}: biased (targeted swipe answers are for analysis, not tuning or gating)`); continue; }
   const file = imageIndex.get(j.image?.sha256) || (j.image?.path && fs.existsSync(P(j.image.path)) ? P(j.image.path) : null);
   if (!file) { console.warn(`skip ${f}: image ${j.image?.sha256?.slice(0, 12)} not found (add it to feedback/images/)`); continue; }
   sets.push({ name: f, gt: j, truth: loadTruth(j), img: resizeTo(decode(file), j.image.width, j.image.height) }); }
 const fingerprint = crypto.createHash('sha256').update(JSON.stringify(sets.map(s => [s.name, s.gt.truth, s.gt.roi]))).digest('hex').slice(0, 12);
 if (!sets.length) { console.log('No usable ground truth in feedback/ — nothing to do.'); process.exit(0); }
+// Per-photo holdout: whole photos are held out of tuning so tuned params are judged on photos the tuner never saw.
+const photos = [...new Set(sets.map(s => s.gt.image.sha256))].sort();
+let holdoutPhotos = photos.length >= 2 ? photos.filter(h => parseInt(h.slice(0, 8), 16) % 4 === 0) : [];
+if (photos.length >= 2 && !holdoutPhotos.length) holdoutPhotos = [photos[0]];
+if (holdoutPhotos.length === photos.length) holdoutPhotos = holdoutPhotos.slice(0, -1);
+const trainSets = sets.filter(s => !holdoutPhotos.includes(s.gt.image.sha256)), holdSets = sets.filter(s => holdoutPhotos.includes(s.gt.image.sha256));
+console.log(`photos: ${photos.length} · holdout: ${holdSets.length ? holdSets.map(s => s.name).join(', ') : 'none (needs ≥ 2 photos; gate uses all ground truth)'} · skipped biased: ${skippedBiased}`);
 
-function evaluate(params) {
-  let tp = 0, fp = 0, fn = 0, ce = 0, bn = 0, bok = 0; const per = [];
-  for (const s of sets) { const r = analyzeImage(s.img, params); const sc = score(s.truth, r.beans, r.params.beanRadius, s.gt.roi);
-    tp += sc.tp; fp += sc.fp; fn += sc.fn; ce += Math.abs(sc.countError); if (sc.bandChecked) { bn += sc.bandChecked; bok += sc.bandAgreement * sc.bandChecked; }
+// Swipe-review files cover only the reviewed beans: precision from those; misses tapped in the gap tiles are re-checked
+// against the new detections, scaled up by the reviewed gap share and down to the size of the reviewed sample. No count error.
+function scoreSwipe(s, r) {
+  const R = r.params.beanRadius, added = s.gt.corrections?.added || [], isAdded = p => added.some(a => a.x === p.x && a.y === p.y);
+  const roi = { points: s.gt.roi.points.filter(q => !added.some(a => a.x === q[0] && a.y === q[1])), r: s.gt.roi.r };
+  const sc = score(s.truth.filter(t => !isAdded(t)), r.beans, R, roi);
+  const missNow = added.filter(a => !r.beans.some(d => (d.x - a.x) ** 2 + (d.y - a.y) ** 2 <= R * R)).length;
+  const share = s.gt.source.reviewedShare || 1, plate = Math.max(1, r.beans.length);
+  const fn = missNow / share * ((sc.tp + sc.fp) / plate);
+  const recall = sc.tp + fn ? sc.tp / (sc.tp + fn) : 1;
+  return { ...sc, fn, recall: Math.round(recall * 1e4) / 1e4, countError: null };
+}
+function evaluate(params, list = sets) {
+  let tp = 0, fp = 0, fn = 0, ce = 0, nce = 0, bn = 0, bok = 0; const per = [];
+  for (const s of list) { const r = analyzeImage(s.img, params); const swipe = s.gt.source?.kind === 'swipe-review';
+    const sc = swipe ? scoreSwipe(s, r) : score(s.truth, r.beans, r.params.beanRadius, s.gt.roi);
+    tp += sc.tp; fp += sc.fp; fn += sc.fn; if (sc.countError != null) { ce += Math.abs(sc.countError); nce++; } if (sc.bandChecked) { bn += sc.bandChecked; bok += sc.bandAgreement * sc.bandChecked; }
     per.push({ file: s.name, truth: sc.truth, detected: sc.detected, precision: sc.precision, recall: sc.recall, f1: sc.f1, countError: sc.countError }); }
   const precision = tp / Math.max(1, tp + fp), recall = tp / Math.max(1, tp + fn), f1 = precision + recall ? 2 * precision * recall / (precision + recall) : 0;
   const r4 = v => Math.round(v * 10000) / 10000;
-  return { f1: r4(f1), precision: r4(precision), recall: r4(recall), meanAbsCountError: r4(ce / sets.length), bandAgreement: bn ? r4(bok / bn) : null, bandChecked: bn, images: sets.length, truthBeans: tp + fn, per };
+  return { f1: r4(f1), precision: r4(precision), recall: r4(recall), meanAbsCountError: nce ? r4(ce / nce) : null, bandAgreement: bn ? r4(bok / bn) : null, bandChecked: bn, images: list.length, truthBeans: Math.round(tp + fn), per };
 }
 // unlabeled stability guard: total bean count on the demo photos must not swing > STABILITY_TOL
 const demo = fs.readdirSync(P('docs/demo')).filter(f => /\.jpe?g$/i.test(f)).map(f => decode(P('docs/demo', f)));
@@ -55,6 +79,7 @@ const demoCount = params => demo.reduce((s, im) => s + analyzeImage(im, params).
 const current = readJSON(P('docs/params.json'), null);
 const curParams = { ...DEFAULTS, ...(current?.params || {}) };
 const base = evaluate(curParams);
+const gateSets = holdSets.length ? holdSets : sets, baseGate = holdSets.length ? evaluate(curParams, holdSets) : base;
 console.log(`ground truth: ${sets.length} file(s), ${base.truthBeans} beans, fingerprint ${fingerprint}`);
 console.log(`current params ${current?.version || '(defaults)'}: F1 ${base.f1}  P ${base.precision}  R ${base.recall}  |count err| ${base.meanAbsCountError}`);
 
@@ -62,19 +87,24 @@ console.log(`current params ${current?.version || '(defaults)'}: F1 ${base.f1}  
 const history = readJSON(P('docs/metrics/history.json'), []);
 const last = [...history].reverse().find(h => h.gtFingerprint === fingerprint);
 let regression = null;
-if (last && base.f1 < last.f1 - REGRESSION_TOL) regression = `F1 fell from ${last.f1} (${last.version}, ${last.date}) to ${base.f1} with the current code/params`;
+const lastGate = last ? (last.holdoutF1 ?? last.f1) : null;
+if (last && baseGate.f1 < lastGate - REGRESSION_TOL) regression = `${holdSets.length ? 'holdout ' : ''}F1 fell from ${lastGate} (${last.version}, ${last.date}) to ${baseGate.f1} with the current code/params`;
 
-let best = { params: curParams, m: base }, changed = false, note = 'no change';
+const trainBase = holdSets.length ? evaluate(curParams, trainSets) : base;
+let best = { params: curParams, m: trainBase }, changed = false, note = 'no change';
 if (TUNE) {
   const cands = k => { const v = best.params[k]; const [lo, hi] = BOUNDS[k]; return [...new Set([v * 0.8, v * 0.9, v * 1.1, v * 1.25].map(x => +Math.min(hi, Math.max(lo, x)).toFixed(3)))].filter(x => x !== v); };
   for (let round = 0; round < 2; round++) for (const k of TUNABLE) for (const v of cands(k)) {
-    const p = { ...best.params, [k]: v }; const m = evaluate(p);
+    const p = { ...best.params, [k]: v }; const m = evaluate(p, trainSets);
     if (m.f1 > best.m.f1 + 1e-4 || (m.f1 === best.m.f1 && m.meanAbsCountError < best.m.meanAbsCountError - 1e-4)) { best = { params: p, m }; console.log(`  better: ${k}=${v} → F1 ${m.f1}`); } }
-  if (best.m.f1 >= base.f1 + MIN_GAIN) {
+  const holdBest = holdSets.length ? evaluate(best.params, holdSets) : null;
+  if (holdBest && best.params !== curParams && holdBest.f1 < baseGate.f1 - 1e-4) note = `rejected tuned params: train F1 ${trainBase.f1} → ${best.m.f1} but holdout F1 ${baseGate.f1} → ${holdBest.f1} (overfitting)`;
+  else if (best.m.f1 >= trainBase.f1 + MIN_GAIN) {
     const c0 = demoCount(curParams), c1 = demoCount(best.params); const swing = Math.abs(c1 - c0) / c0;
     if (swing > STABILITY_TOL) note = `rejected tuned params: demo bean count would swing ${(swing * 100).toFixed(1)}% (${c0}→${c1}), likely overfitting`;
     else { changed = true; note = `tuned: F1 ${base.f1} → ${best.m.f1} (demo count ${c0}→${c1})`; }
   } else note = `tuning found no gain ≥ ${MIN_GAIN} (best ${best.m.f1})`;
+  if (changed) best = { params: best.params, m: evaluate(best.params) };
   console.log(note);
 }
 const ship = changed ? best : { params: curParams, m: base };
@@ -82,9 +112,9 @@ const prevV = current?.version || `${ALGO_VERSION}.0`; const [maj, min, patch] =
 const algoChanged = `${maj}.${min}` !== ALGO_VERSION;
 const version = algoChanged ? `${ALGO_VERSION}.0` : changed ? `${maj}.${min}.${patch + 1}` : prevV;
 const today = new Date().toISOString().slice(0, 10);
-const { per, ...summary } = ship.m;
+const { per, ...summary } = ship.m; if (holdSets.length) summary.holdoutF1 = evaluate(ship.params, holdSets).f1;
 const out = { version, algoVersion: ALGO_VERSION, date: changed || !current ? today : current.date, params: ship.params, benchmark: { ...summary, gtFingerprint: fingerprint, perImage: per }, note };
-if (DRY) console.log(JSON.stringify({ dry: true, version, params: ship.params, f1: summary.f1 }));
+if (DRY) console.log(JSON.stringify({ dry: true, version, params: ship.params, f1: summary.f1, holdoutF1: summary.holdoutF1 ?? null, holdout: holdSets.map(s => s.name), skippedBiased, note }));
 else if (TUNE || !current) {
   fs.writeFileSync(P('docs/params.json'), JSON.stringify(out, null, 1) + '\n');
   if (!last || last.f1 !== summary.f1 || last.version !== version || last.gtFingerprint !== fingerprint) {

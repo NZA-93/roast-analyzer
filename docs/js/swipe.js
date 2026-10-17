@@ -1,9 +1,9 @@
 // Tinder-style bean review: one bean card at a time. Right = correct, left = wrong (+ one reason chip), up = skip.
-import { selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA } from './swipe-core.js';
+import { selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA, COLOUR_PIPELINE_VERSION, KNOWN_IMAGES } from './swipe-core.js';
 import { FEEDBACK_ENDPOINT, CARDS_PER_SESSION } from './config.js';
 
 const $ = id => document.getElementById(id);
-const OUTBOX = 'ra-swipe-outbox', REQUEUE = sha => 'ra-swipe-requeue:' + sha, SEEN = sha => 'ra-swipe-seen:' + sha;
+const OUTBOX = 'ra-swipe-outbox', SENDPHOTO = 'ra-swipe-send-photo', GAP_TILES = 4, REQUEUE = sha => 'ra-swipe-requeue:' + sha, SEEN = sha => 'ra-swipe-seen:' + sha;
 const CHIP_MS = 2000, LONG_MS = 450;
 let api, S = null, tintEl = null; // session
 const tint = () => (tintEl ||= document.getElementById('tint'));
@@ -27,9 +27,11 @@ function renderCrop(s, bean, sibling, size) {
   ctx.drawImage(tmp, (x0 - (Math.round(bean.x) - half)) * k, (y0 - (Math.round(bean.y) - half)) * k, w * k, h * k);
   const P = q => [(q.x - (Math.round(bean.x) - half)) * k, (q.y - (Math.round(bean.y) - half)) * k];
   ctx.lineWidth = Math.max(3, cv.width / 110);
-  const ring = (q, col, dash) => { const [px, py] = P(q); ctx.setLineDash(dash ? [10, 8] : []); ctx.strokeStyle = '#000a'; ctx.lineWidth += 2; ctx.beginPath(); ctx.arc(px, py, R * 1.35 * k, 0, 7); ctx.stroke(); ctx.lineWidth -= 2; ctx.strokeStyle = col; ctx.stroke(); };
-  if (sibling) ring(sibling, '#f59e0b', true);
-  ring(bean, '#ffe14d', false); ctx.setLineDash([]);
+  const [bx, by] = P(bean);
+  if (sibling) { const [sx, sy] = P(sibling); ctx.setLineDash([]); ctx.lineWidth = Math.max(1.5, cv.width / 300); ctx.strokeStyle = '#d4d4d4cc'; ctx.beginPath(); ctx.arc(sx, sy, R * 1.25 * k, 0, 7); ctx.stroke(); }
+  // one bold ring on the subject (dark halo + yellow) so it reads on light and dark beans
+  ctx.lineWidth = Math.max(7, cv.width / 55); ctx.strokeStyle = '#000b'; ctx.beginPath(); ctx.arc(bx, by, R * 1.4 * k, 0, 7); ctx.stroke();
+  ctx.lineWidth = Math.max(4, cv.width / 90); ctx.strokeStyle = '#ffe14d'; ctx.stroke();
   return cv;
 }
 
@@ -48,7 +50,7 @@ async function start() {
     version: api.version(), phash: await paramsHash(det?.params || null), params: det?.params || {}, cache: new Map(), id: `${new Date().toISOString().slice(0, 10)}-${s.sha256.slice(0, 8)}-${seed.toString(36)}` };
   $('swipe').hidden = false; document.body.classList.add('noscroll'); show();
 }
-function close() { clearTimeout(S?.chipTimer); $('swipe').hidden = true; document.body.classList.remove('noscroll'); S = null; }
+function close() { clearTimeout(S?.chipTimer); if (S?.pendingSend) { clearTimeout(S.pendingSend); S.pendingSend = null; flush(); } $('swipe').hidden = true; document.body.classList.remove('noscroll'); S = null; }
 function cardCanvas(k) {
   if (k >= S.cards.length) return null; if (S.cache.has(k)) return S.cache.get(k);
   const b = S.s.beans.find(q => q.id === S.cards[k].id), sib = siblingOf(b, S.s.beans, S.R);
@@ -88,7 +90,8 @@ function chip(reason, mergeN) { clearTimeout(S.chipTimer); answer('wrong', reaso
 function undo() {
   if (!S) return; clearTimeout(S.chipTimer);
   if (!$('chips').hidden) { show(); return; } // mid-chip: just bring the card back
-  const h = S.history.pop(); if (!h) return; S.answers.length = h.n; S.i = h.i; S.missed = []; show();
+  if (!$('gaps').hidden) { const mine = S.tileMissed[S.gi]; if (mine.length) { mine.pop(); drawGaps(); return; } if (S.gi > 0) { S.gi--; gaps(); return; } S.gap = null; }
+  const h = S.history.pop(); if (!h) return; S.answers.length = h.n; S.i = h.i; show();
 }
 
 // ---------- drag ----------
@@ -104,46 +107,83 @@ function setupDrag() {
   card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
 }
 
-// ---------- gaps screen (missed beans -> FN with locations) ----------
+// ---------- gap tiles (missed beans -> FN with locations) ----------
+// The pile is cut into tiles of ~8 bean radii. Gap area = pixels inside the pile's tiles not covered by a detection.
+// The GAP_TILES tiles with the most gap area are shown one per screen; the rest of the gap area is unreviewed and the
+// miss estimate is scaled by the reviewed share (reviewedShare in swipe-core).
+export function gapTiles(s, n = GAP_TILES) {
+  const R = s.params.beanRadius, T = Math.round(8 * R), lm = s.labelMap, w = s.width, tiles = [];
+  for (let y0 = 0; y0 + T / 2 < s.height; y0 += T) for (let x0 = 0; x0 + T / 2 < w; x0 += T) {
+    const x1 = Math.min(w, x0 + T), y1 = Math.min(s.height, y0 + T);
+    const nDet = s.beans.filter(b => b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1).length; if (nDet < 3) continue; // outside the pile
+    let gap = 0; for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) if (!lm[y * w + x]) gap += 4;
+    tiles.push({ rect: [x0, y0, x1, y1], gapArea: gap, nDet }); }
+  // keep tiles inside the pile (at least the median bean density) so empty plate at the rim doesn't win
+  const dens = tiles.map(t => t.nDet).sort((a, b) => a - b), medD = dens[dens.length >> 1] || 0;
+  tiles.splice(0, tiles.length, ...tiles.filter(t => t.nDet >= medD).map(({ nDet, ...t }) => t));
+  const total = tiles.reduce((t, g) => t + g.gapArea, 0);
+  return { total, tiles: [...tiles].sort((a, b) => b.gapArea - a.gapArea).slice(0, n) };
+}
 function gaps() {
-  $('deck').hidden = true; $('swButtons').hidden = true; $('gaps').hidden = false; $('swProgress').textContent = 'Missed any?'; $('swBar').style.width = '100%';
+  if (!S.gap) { S.gap = gapTiles(S.s); S.gi = 0; S.tileMissed = S.gap.tiles.map(() => []); }
+  if (S.gi >= S.gap.tiles.length) return finish();
+  $('deck').hidden = true; $('swButtons').hidden = true; $('gaps').hidden = false; $('done').hidden = true;
+  $('swProgress').textContent = `Missed any? ${S.gi + 1}/${S.gap.tiles.length}`; $('swBar').style.width = '100%'; $('swUndo').disabled = false;
   S.missedScreenShown = true; drawGaps();
 }
 function drawGaps() {
-  const s = S.s, cv = $('gapCanvas'); cv.width = s.width; cv.height = s.height; const ctx = cv.getContext('2d'); ctx.drawImage(s.canvas, 0, 0);
-  const R = S.R; ctx.lineWidth = Math.max(3, s.width / 300);
-  // found beans get a dark disc, so the uncovered parts of the plate (where a missed bean would be) stand out
-  ctx.fillStyle = '#000000a0'; s.beans.forEach(b => { ctx.beginPath(); ctx.arc(b.x, b.y, R * 1.05, 0, 7); ctx.fill(); });
-  S.missed.forEach(m => { ctx.strokeStyle = '#22c55e'; ctx.beginPath(); ctx.arc(m.x, m.y, R * 1.2, 0, 7); ctx.stroke(); ctx.fillStyle = '#22c55e'; ctx.font = `bold ${R * 1.4}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('+', m.x, m.y); });
-  $('gapsDone').textContent = S.missed.length ? `Done · ${S.missed.length} missed ✓` : 'None ✓';
+  const s = S.s, R = S.R, [x0, y0, x1, y1] = S.gap.tiles[S.gi].rect, cv = $('gapCanvas'), size = Math.min(window.innerWidth - 24, window.innerHeight * 0.62, 760);
+  const dpr = Math.min(2, window.devicePixelRatio || 1); cv.width = cv.height = Math.round(size * dpr); cv.style.width = cv.style.height = size + 'px';
+  const k = cv.width / Math.max(x1 - x0, y1 - y0), ctx = cv.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+  ctx.fillStyle = '#ddd'; ctx.fillRect(0, 0, cv.width, cv.height); ctx.drawImage(s.canvas, x0, y0, x1 - x0, y1 - y0, 0, 0, (x1 - x0) * k, (y1 - y0) * k);
+  // found beans get a dark dot; anything bean-shaped without one is a miss
+  ctx.fillStyle = '#000000b0'; ctx.strokeStyle = '#fff8'; ctx.lineWidth = 2;
+  s.beans.forEach(b => { if (b.x < x0 - R || b.x > x1 + R || b.y < y0 - R || b.y > y1 + R) return; ctx.beginPath(); ctx.arc((b.x - x0) * k, (b.y - y0) * k, R * 0.45 * k, 0, 7); ctx.fill(); ctx.stroke(); });
+  const mine = S.tileMissed[S.gi]; ctx.lineWidth = Math.max(4, cv.width / 120);
+  mine.forEach(m => { ctx.strokeStyle = '#22c55e'; ctx.beginPath(); ctx.arc((m.x - x0) * k, (m.y - y0) * k, R * 1.2 * k, 0, 7); ctx.stroke(); });
+  $('gapsDone').textContent = mine.length ? `Next ✓ (${mine.length} marked)` : 'None ✓';
 }
 function tapGap(e) {
-  const cv = $('gapCanvas'), r = cv.getBoundingClientRect(); const x = Math.round((e.clientX - r.left) / r.width * S.s.width), y = Math.round((e.clientY - r.top) / r.height * S.s.height);
-  const j = S.missed.findIndex(m => (m.x - x) ** 2 + (m.y - y) ** 2 < (S.R * 1.3) ** 2);
-  if (j >= 0) S.missed.splice(j, 1); else S.missed.push({ x, y }); drawGaps();
+  const [x0, y0, x1, y1] = S.gap.tiles[S.gi].rect, cv = $('gapCanvas'), r = cv.getBoundingClientRect(), sc = Math.max(x1 - x0, y1 - y0);
+  const x = Math.round(x0 + (e.clientX - r.left) / r.width * sc), y = Math.round(y0 + (e.clientY - r.top) / r.height * sc); if (x >= x1 || y >= y1) return;
+  const mine = S.tileMissed[S.gi], j = mine.findIndex(m => (m.x - x) ** 2 + (m.y - y) ** 2 < (S.R * 1.3) ** 2);
+  if (j >= 0) mine.splice(j, 1); else mine.push({ x, y }); drawGaps();
 }
+function nextTile() { S.gi++; gaps(); }
 
 // ---------- finish: store, queue, send ----------
+function photoDataURL(s) { for (const q of [0.85, 0.7, 0.55]) { const u = s.canvas.toDataURL('image/jpeg', q); if (u.length < 1.4e6) return u; } return null; }
 async function finish() {
-  const s = S.s; const batch = { schema: BATCH_SCHEMA, id: S.id, createdAt: new Date().toISOString(), image: { name: s.name, sha256: s.sha256, width: s.width, height: s.height, ...(s.demoPath ? { path: s.demoPath } : {}) },
-    beanRadius: S.R, detectorVersion: S.version, paramsHash: S.phash, params: S.params, seed: S.seed, answers: S.answers, missed: S.missed, missedScreenShown: !!S.missedScreenShown };
-  // remember which beans were seen, and re-queue the "wrong, unspecified" ones for next time
+  const s = S.s, missed = S.tileMissed.flat();
+  const batch = { schema: BATCH_SCHEMA, id: S.id, createdAt: new Date().toISOString(), image: { name: s.name, sha256: s.sha256, width: s.width, height: s.height, ...(s.demoPath ? { path: s.demoPath } : {}) },
+    beanRadius: S.R, detectorVersion: S.version, paramsHash: S.phash, params: S.params, seed: S.seed, detectionsOnPlate: s.beans.length,
+    colourPipelineVersion: COLOUR_PIPELINE_VERSION, wbGains: s.params.wbGains || [1, 1, 1],
+    answers: S.answers, missed, gapTiles: S.gap.tiles.map((g, i) => ({ rect: g.rect, gapArea: g.gapArea, missed: S.tileMissed[i].length })), totalGapArea: S.gap.total, missedScreenShown: !!S.missedScreenShown };
   const latest = new Map(); S.answers.forEach(a => latest.set(a.beanId, a));
   localStorage.setItem(REQUEUE(s.sha256), JSON.stringify([...latest.values()].filter(a => a.reason === 'unspecified').map(a => ({ id: a.beanId, pick: a.pick }))));
   localStorage.setItem(SEEN(s.sha256), JSON.stringify([...new Set([...readJ(SEEN(s.sha256), []), ...latest.keys()])]));
-  $('gaps').hidden = true; $('done').hidden = false; $('swUndo').disabled = true;
-  if (!S.answers.length) { $('doneMsg').textContent = 'Nothing to send.'; return; }
+  $('gaps').hidden = true; $('done').hidden = false; $('swUndo').disabled = true; $('swProgress').textContent = 'Done';
+  if (!S.answers.length) { $('doneMsg').textContent = 'Nothing to send.'; $('photoToggle').hidden = true; return; }
   const problems = validateBatch(batch); if (problems.length) { $('doneMsg').textContent = 'Could not save: ' + problems.join(', '); return; }
-  const box = readJ(OUTBOX, []); box.push({ batch, sent: false }); localStorage.setItem(OUTBOX, JSON.stringify(box));
-  $('doneMsg').textContent = 'Sending…'; const ok = await flush();
-  const left = readJ(OUTBOX, []).filter(b => !b.sent).length;
-  $('doneMsg').textContent = ok && !left ? 'Sent ✓ Thank you!' : `Saved, will send later (${left} waiting).`;
+  // own photos must travel with the answers or they cannot be scored; demo photos are already in the repo
+  const needsPhoto = !KNOWN_IMAGES.includes(s.sha256); $('photoToggle').hidden = !needsPhoto; $('sendPhoto').checked = readJ(SENDPHOTO, true);
+  const box = readJ(OUTBOX, []); box.push({ batch, sent: false, needsPhoto, photo: needsPhoto ? photoDataURL(s) : null }); try { localStorage.setItem(OUTBOX, JSON.stringify(box)); } catch { box.at(-1).photo = null; localStorage.setItem(OUTBOX, JSON.stringify(box)); }
+  $('doneMsg').textContent = 'Saved ✓'; // upload runs in the background via the outbox; never blocks
+  S.pendingSend = setTimeout(sendNow, 5000); // a moment to switch the photo toggle; leaving the screen sends at once (in the background)
 }
-export async function flush() {
+function sendNow() { if (!S?.pendingSend) return; clearTimeout(S.pendingSend); S.pendingSend = null; uploadInBackground(); }
+async function uploadInBackground() {
+  const done = $('doneMsg'); const ok = await flush(); const box = readJ(OUTBOX, []), left = box.filter(b => !b.sent).length, rej = box.find(b => !b.sent && b.rejected);
+  if ($('done').hidden) return;
+  done.textContent = ok && !left ? 'Saved ✓ · sent' : rej ? `Saved ✓ on this device · not sent: ${rej.rejected}` : `Saved ✓ · will send later (${left} waiting)`;
+}
+let flushing = null;
+export function flush() { return flushing ||= doFlush().finally(() => { flushing = null; }); }
+async function doFlush() {
   const box = readJ(OUTBOX, []); if (!FEEDBACK_ENDPOINT || !navigator.onLine) return false; let all = true;
   for (const item of box) { if (item.sent) continue;
-    try { const r = await fetch(FEEDBACK_ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(item.batch) });
-      if (r.ok || r.status === 409) item.sent = new Date().toISOString(); else { all = false; if (r.status === 400) item.rejected = (await r.text()).slice(0, 200); } } catch { all = false; } }
+    try { const r = await fetch(FEEDBACK_ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(item.needsPhoto && readJ(SENDPHOTO, true) && item.photo ? { ...item.batch, photo: item.photo } : item.batch) });
+      if (r.ok || r.status === 409) { item.sent = new Date().toISOString(); item.photo = null; } else { all = false; if (r.status === 400 || r.status === 422) item.rejected = ((await r.json().catch(() => ({}))).detail || 'rejected by server').slice(0, 200); } } catch { all = false; } }
   localStorage.setItem(OUTBOX, JSON.stringify(box.filter(b => !b.sent || Date.now() - Date.parse(b.sent) < 30 * 864e5))); return all;
 }
 function exportAll() {
@@ -164,11 +204,11 @@ export function init(a) {
   ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => two.addEventListener(ev, () => clearTimeout(lt)));
   two.addEventListener('contextmenu', e => e.preventDefault());
   $('gapCanvas').addEventListener('click', tapGap);
-  $('gapZoom').addEventListener('click', () => { const z = $('gapCanvas').classList.toggle('zoomed'); $('gapZoom').textContent = z ? 'Fit' : '🔍 Zoom'; });
-  $('gapsDone').addEventListener('click', finish);
+  $('gapsDone').addEventListener('click', nextTile);
+  $('sendPhoto').addEventListener('change', e => localStorage.setItem(SENDPHOTO, JSON.stringify(e.target.checked)));
   $('swExport').addEventListener('click', exportAll);
-  $('swAgain').addEventListener('click', () => { close(); start(); });
-  $('swDoneClose').addEventListener('click', close);
+  $('swAgain').addEventListener('click', () => { sendNow(); close(); start(); });
+  $('swDoneClose').addEventListener('click', () => { sendNow(); close(); });
   document.addEventListener('keydown', e => { if (!S || $('swipe').hidden) return; if (e.key === 'ArrowRight') right(); else if (e.key === 'ArrowLeft') left(); else if (e.key === 'ArrowUp') up(); else if (e.key === 'Escape') close(); else if (e.key === 'z' || e.key === 'Backspace') undo(); });
   setupDrag();
   window.addEventListener('online', flush); flush();

@@ -31,10 +31,11 @@ The Agtron-like number is **not** an Agtron reading. Default mapping is a provis
 
 ## Swipe review (ground truth in ~1 minute)
 
-After loading photos, tap **👆 Check the detector**. You get one bean card at a time: swipe right if it's correct, left if it's wrong (then tap one reason chip, or wait 2 s), up to skip. Undo is top-left. A final screen shows the plate with found beans darkened: tap any missed bean, or tap **None ✓**.
+After loading photos, tap **👆 Check the detector**. You get one bean card at a time: swipe right if it's correct, left if it's wrong (then tap one reason chip, or wait 2 s), up to skip. Undo is top-left. Then 4 zoomed gap tiles follow, one per screen. Tap any missed bean, or tap **None ✓**. Misses are scaled up by the share of the plate's gap area that was reviewed.
 
 - Cards: 70% targeted (low detector confidence, unusual size, colour outliers) and 30% random, each tagged. Precision is reported from the random answers only.
 - Answers are kept on the device (`localStorage` outbox) and POSTed to `FEEDBACK_ENDPOINT` in `docs/js/config.js` with automatic retry. Until that's set, use **Export answers**.
 - `docs/js/swipe-core.js` turns a batch into `roast-analyzer/ground-truth@1` files (scope = reviewed beans only). "Wrong colour" is a flag stored with raw L* and glare, never a band label.
 - The `worker/` Cloudflare Worker validates batches and commits them to `feedback/` (not deployed yet; see `worker/README.md`).
-- Tests: `cd tools && npm test`. Browser end-to-end check: `node tools/swipe-e2e.mjs` with `docs/` served on :8765.
+- Swipe batches score precision from the random cards, and recall over the whole plate (detections × precision vs estimated misses). They never compute count error.
+- Tests: `cd tools && npm test` (fast), plus `npm run test:bench` (about 3 min; covers the biased-file skip and the per-photo holdout). Browser end-to-end check: `node tools/swipe-e2e.mjs` with `docs/` served on :8765.

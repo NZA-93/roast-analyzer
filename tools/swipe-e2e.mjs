@@ -21,12 +21,14 @@ for (const [name, vp] of [['phone', { width: 390, height: 844 }], ['ipad', { wid
     if (k === 2) { await p.click('#swUndo'); await p.waitForTimeout(50); const bx = await p.locator('#card').boundingBox(); await p.click('#btnRight'); await p.waitForTimeout(200); }
   }
   await p.waitForSelector('#gaps:not([hidden])'); await p.screenshot({ path: `/workspace/swipe-${name}-gaps.png` });
-  const g = await p.locator('#gapCanvas').boundingBox(); await p.mouse.click(g.x + 5, g.y + 5);
+  const g = await p.locator('#gapCanvas').boundingBox(); await p.mouse.click(g.x + g.width / 2, g.y + g.height / 2);
+  const tiles = []; for (let k = 0; k < 6 && await p.locator('#gaps').isVisible(); k++) { tiles.push(await p.locator('#swProgress').textContent()); if (k === 0) await p.screenshot({ path: `/workspace/swipe-${name}-gaps-tapped.png` }); await p.click('#gapsDone'); await p.waitForTimeout(80); }
   const el = Date.now() - t0;
-  await p.click('#gapsDone'); await p.waitForSelector('#done:not([hidden])'); await p.waitForTimeout(300);
+  const sizes = await p.evaluate(() => ({ q: getComputedStyle(document.querySelector('.swhelp')).fontSize, yes: document.getElementById('btnRight').getBoundingClientRect().width, zoom: !!document.getElementById('gapZoom') }));
+  await p.waitForSelector('#done:not([hidden])'); await p.waitForTimeout(300);
   await p.screenshot({ path: `/workspace/swipe-${name}-done.png` });
   const out = await p.evaluate(() => JSON.parse(localStorage.getItem('ra-swipe-outbox')));
   const bt = out.at(-1).batch; const cnt = {}; bt.answers.forEach(a => { const k = a.answer + (a.reason ? ':' + a.reason : ''); cnt[k] = (cnt[k] || 0) + 1; });
-  console.log(name, { ms: el, answers: bt.answers.length, picks: bt.answers.reduce((o, a) => (o[a.pick] = (o[a.pick] || 0) + 1, o), {}), cnt, missed: bt.missed.length, msg: await p.locator('#doneMsg').textContent(), sample: bt.answers[0], errs });
+  console.log(name, { ms: el, answers: bt.answers.length, picks: bt.answers.reduce((o, a) => (o[a.pick] = (o[a.pick] || 0) + 1, o), {}), cnt, missed: bt.missed.length, tiles, gapTiles: bt.gapTiles.length, share: (bt.gapTiles.reduce((t, x) => t + x.gapArea, 0) / bt.totalGapArea).toFixed(3), wb: bt.wbGains, cpv: bt.colourPipelineVersion, sizes, toggleShown: await p.locator('#photoToggle').isVisible(), msg: await p.locator('#doneMsg').textContent(), sample: bt.answers[0], errs });
   await p.close(); }
 await b.close();

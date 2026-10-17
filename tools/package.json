@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test-swipe.mjs && node test-worker.mjs"
+    "test": "node test-swipe.mjs && node test-worker.mjs",
+    "test:bench": "node test-benchmark.mjs"
   },
   "keywords": [],
   "author": "",

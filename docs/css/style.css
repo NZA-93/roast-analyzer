@@ -71,7 +71,7 @@ body.noscroll{overflow:hidden}
 .swprog{flex:1;text-align:center}.swprog b{font-size:1.1rem}
 .swtrack{height:6px;background:#fff2;border-radius:3px;margin-top:4px;overflow:hidden}#swBar{height:100%;width:0;background:#f5c26b;transition:width .2s}
 .deck{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;min-height:0}
-.swhelp{margin:4px 0 12px;text-align:center;opacity:.9}
+.swhelp{margin:4px 0 12px;text-align:center;opacity:.95;font-size:18px;line-height:1.35}
 .swcard{position:relative;width:min(70vw,55vh,620px);aspect-ratio:1;border-radius:18px;overflow:hidden;box-shadow:0 10px 30px #0008;touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;will-change:transform}
 .swcard canvas{width:100%;height:100%;display:block}
 .tint{position:absolute;inset:0;opacity:0;pointer-events:none}
@@ -88,7 +88,7 @@ body.noscroll{overflow:hidden}
 @keyframes chipcount{from{width:100%}to{width:0}}
 .gaps,.done{flex:1;width:100%;max-width:820px;display:flex;flex-direction:column;align-items:center;min-height:0}
 .gapwrap{flex:1;min-height:0;width:100%;display:flex;align-items:center;justify-content:center;overflow:auto;-webkit-overflow-scrolling:touch}
-#gapCanvas.zoomed{max-width:none;max-height:none;width:300%}
-.gapwrap:has(.zoomed){display:block}
 #gapCanvas{max-width:100%;max-height:100%;border-radius:10px;touch-action:manipulation}
 .done{justify-content:center;gap:6px}.donemsg{font-size:1.4rem;font-weight:700;text-align:center}
+@media (min-width:600px){.sw.no,.sw.yes{width:88px;height:88px;min-width:72px;min-height:72px;font-size:2.4rem}.swhelp{font-size:20px}}
+.phototoggle{display:flex;align-items:center;gap:12px;min-height:56px;font-size:1.05rem}.phototoggle input{width:28px;height:28px}
