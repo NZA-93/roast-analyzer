@@ -18,7 +18,7 @@ For: **Bean Vision Developer**. Scope: `docs/js/analyzer.js`, `docs/js/app.js`, 
 - Range: outside `[min L*, max L*]` of the references, **clamp** to the end values and show a **warning** ("outside calibrated range") on that bean, sample and batch.
 - Flat runs: where isotonic pooling merges references into a flat run (equal Agtron over an L* interval), **flag it** in the fit result and the UI. It means those references disagree with monotonicity or can't be told apart, so re-photograph them or add a reference in that range.
 - Labels by calibration level:
-  - No user references (provisional default) or **N < 5**, or no leave-one-out error reported yet: **"uncalibrated estimate"**. Exception below.
+  - Provisional default line, **0–1 references**, or no leave-one-out error reported yet: **"uncalibrated estimate"**.
   - **2–4 references** with a reported leave-one-out error: **"partial calibration"**, shown with that error.
   - **N ≥ 5** with a reported leave-one-out error: calibrated (show the error, see Calibrate UX).
 - Tests: monotonicity for random point sets; N = 2 equals the current line; known LOO values on a fixture.
