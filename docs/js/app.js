@@ -1,8 +1,11 @@
-import { BANDS, DEFAULT_CAL, agtronFromL, bandOf, batchReport } from './analyzer.js';
+import { BANDS, DEFAULT_CAL, agtronFromL, bandOf, batchReport, ALGO_VERSION } from './analyzer.js';
+import { tester } from './tester.js';
 
 const $ = (id) => document.getElementById(id);
 const MAX = 1600;
-const state = { samples: [], report: null, current: 0, selected: null, cal: loadCal() };
+const state = { samples: [], report: null, current: 0, selected: null, cal: loadCal(), detector: null };
+// tuned detector parameters produced by tools/benchmark.mjs from the feedback/ ground truth
+const detectorReady = fetch('params.json', { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null).then(d => { state.detector = d; showDetector(); return d; });
 let worker = null, seq = 0; const pending = new Map();
 
 function loadCal() { try { const c = JSON.parse(localStorage.getItem('roastCal')); if (c && isFinite(c.L1) && isFinite(c.L2) && c.L1 !== c.L2) return c; } catch {} return { ...DEFAULT_CAL }; }
@@ -17,17 +20,18 @@ function getWorker() {
 }
 async function analyzeInWorker(img) {
   const id = ++seq; const w = getWorker();
-  return new Promise((res, rej) => { pending.set(id, { res, rej }); const buf = img.data.buffer.slice(0); w.postMessage({ id, width: img.width, height: img.height, buffer: buf }, [buf]); });
+  return new Promise((res, rej) => { pending.set(id, { res, rej }); const buf = img.data.buffer.slice(0); w.postMessage({ id, width: img.width, height: img.height, buffer: buf, opts: state.detector?.params || {} }, [buf]); });
 }
 
 async function loadBitmap(src) {
   const blob = src instanceof Blob ? src : await (await fetch(src)).blob();
+  const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
   const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
   const sc = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
   const cw = Math.round(bmp.width * sc), ch = Math.round(bmp.height * sc);
   const c = document.createElement('canvas'); c.width = cw; c.height = ch; const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0, cw, ch);
-  return { canvas: c, imageData: ctx.getImageData(0, 0, cw, ch) };
+  return { canvas: c, imageData: ctx.getImageData(0, 0, cw, ch), sha256 };
 }
 
 async function addSources(list) {
@@ -36,9 +40,9 @@ async function addSources(list) {
     const { src, name } = list[k];
     status(`Analysing ${name} (${k + 1}/${list.length})…`);
     try {
-      const { canvas, imageData } = await loadBitmap(src);
-      const r = await analyzeInWorker(imageData);
-      r.name = name; r.canvas = canvas; state.samples.push(r);
+      const { canvas, imageData, sha256 } = await loadBitmap(src);
+      await detectorReady; const r = await analyzeInWorker(imageData);
+      r.name = name; r.canvas = canvas; r.sha256 = sha256; r.demoPath = typeof src === 'string' ? 'docs/' + src : null; state.samples.push(r);
     } catch (e) { status(`${name}: ${e.message}`, 'warn'); await new Promise(r => setTimeout(r, 1500)); }
   }
   recompute(); state.current = Math.max(0, state.samples.length - 1);
@@ -68,14 +72,14 @@ function render() {
   $('summary').innerHTML = cards.map(([k, v, s, cls]) => `<div class="card ${cls || ''}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
   $('tabs').innerHTML = state.samples.map((s, i) => `<button role="tab" aria-selected="${i === state.current}" data-i="${i}">${i + 1}. ${esc(s.name)} · ${s.beans.length}</button>`).join('');
   $('legend').innerHTML = BANDS.map(b => `<span><i class="sw" style="background:${b.color}"></i>${b.name}</span>`).join('') + '<span><i class="sw" style="background:#888;border:2px solid #fff;outline:1px solid #888"></i>outlier (white outline)</span>';
-  drawPhoto(); drawMap(); drawHist(); drawTable(); drawOutliers(); calUI();
+  drawPhoto(); drawMap(); drawHist(); drawTable(); drawOutliers(); calUI(); tester.update();
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 function drawPhoto() {
   const s = state.samples[state.current]; if (!s) return; const cv = $('photo');
   cv.width = s.width; cv.height = s.height; const ctx = cv.getContext('2d'); ctx.drawImage(s.canvas, 0, 0);
-  if (!$('showOverlay').checked) return;
+  if (!$('showOverlay').checked) { if (tester.on) tester.drawMarks(ctx, s); return; }
   const img = ctx.getImageData(0, 0, s.width, s.height), d = img.data, lm = s.labelMap, w = s.width;
   const col = new Map(), out = new Set(); s.beans.forEach(b => { col.set(b.id, hex(bandColor(b.band))); if (b.outlier) out.add(b.id); });
   const selId = state.selected && state.selected.sample === state.current + 1 ? state.selected.id : -1;
@@ -89,12 +93,14 @@ function drawPhoto() {
   // thicken outlines for small screens
   ctx.lineWidth = Math.max(2, s.width / 500);
   s.rejected.forEach(q => { ctx.fillStyle = '#ffffffaa'; ctx.fillRect(q.x - 3, q.y - 3, 6, 6); });
+  if (tester.on) tester.drawMarks(ctx, s);
 }
 function hex(h) { return [1, 3, 5].map(k => parseInt(h.slice(k, k + 2), 16)); }
 
 function pickOnPhoto(ev) {
   const s = state.samples[state.current]; if (!s) return; const cv = $('photo'); const r = cv.getBoundingClientRect();
   const x = Math.round((ev.clientX - r.left) / r.width * s.width), y = Math.round((ev.clientY - r.top) / r.height * s.height);
+  if (tester.on) { tester.tap(s, x, y); return; }
   let id = s.labelMap[y * s.width + x];
   if (!id) { let bd = 1e9; const tol = (s.params.beanRadius * 1.6) ** 2; s.beans.forEach(b => { const d = (b.x - x) ** 2 + (b.y - y) ** 2; if (d < bd && d < tol) { bd = d; id = b.id; } }); }
   const b = s.beans.find(q => q.id === id); select(b || null);
@@ -200,3 +206,9 @@ $('resetCal').addEventListener('click', () => { localStorage.removeItem('roastCa
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (state.report) { drawMap(); drawHist(); } }, 200); });
 if (new URLSearchParams(location.search).has('demo')) $('demo').click();
 calUI();
+tester.init({ state, drawPhoto, status, version: () => state.detector?.version || ALGO_VERSION + '.0' });
+function showDetector() { const d = state.detector, el = $('detector'); if (!el) return;
+  if (!d) { el.innerHTML = `Detector ${ALGO_VERSION} (default parameters)`; return; }
+  const b = d.benchmark || {};
+  el.innerHTML = `<b>Detector v${d.version}</b> · benchmark F1 <b>${b.f1}</b> (precision ${b.precision}, recall ${b.recall}) on ${b.truthBeans} hand-checked beans in ${b.images} photo${b.images > 1 ? 's' : ''} · tuned ${d.date}`;
+  fetch('changelog.json', { cache: 'no-cache' }).then(r => r.json()).then(cl => { $('changelog').innerHTML = cl.slice(0, 6).map(c => `<li><b>${esc(c.version)}</b> (${esc(c.date)}): ${esc(c.text)}</li>`).join(''); }).catch(() => {}); }

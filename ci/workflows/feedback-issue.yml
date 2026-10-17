@@ -1,0 +1,33 @@
+name: Feedback issue → ground truth
+on:
+  issues:
+    types: [opened, edited, labeled]
+permissions:
+  contents: write
+  issues: write
+concurrency: { group: benchmark, cancel-in-progress: false }
+jobs:
+  ingest:
+    # only feedback from the owner/collaborators is turned into ground truth automatically
+    if: contains(github.event.issue.labels.*.name, 'detector-feedback') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --prefix tools
+      - id: ingest
+        run: node tools/issue-to-feedback.mjs
+      - name: Benchmark + tune with the new ground truth
+        run: node tools/benchmark.mjs --ci | tee benchmark.log
+      - name: Commit
+        run: |
+          git config user.name "roast-analyzer-bot"; git config user.email "actions@users.noreply.github.com"
+          git add feedback docs/params.json docs/metrics/history.json docs/changelog.json
+          git diff --cached --quiet || (git commit -m "Feedback from #${{ github.event.issue.number }}: $(tail -1 benchmark.log)" && git push)
+      - name: Reply on the issue
+        if: always()
+        env: { GH_TOKEN: "${{ github.token }}", RESULT: "${{ steps.ingest.outputs.result }}" }
+        run: |
+          { echo "$RESULT"; echo; echo '```'; cat benchmark.log 2>/dev/null || echo "benchmark did not run"; echo '```'; } > reply.md
+          gh issue comment ${{ github.event.issue.number }} --repo ${{ github.repository }} --body-file reply.md

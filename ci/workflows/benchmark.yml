@@ -1,0 +1,25 @@
+name: Detector benchmark & tuning
+on:
+  push:
+    branches: [main]
+    paths: ['feedback/**', 'docs/js/analyzer.js', 'docs/js/evaluate.js', 'tools/benchmark.mjs']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: benchmark, cancel-in-progress: false }
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --prefix tools
+      - name: Evaluate, tune, block regressions
+        run: node tools/benchmark.mjs --ci | tee benchmark.log
+      - name: Commit params.json + metrics history
+        run: |
+          git config user.name "roast-analyzer-bot"; git config user.email "actions@users.noreply.github.com"
+          git add docs/params.json docs/metrics/history.json docs/changelog.json
+          git diff --cached --quiet || (git commit -m "Detector benchmark: $(tail -1 benchmark.log) [skip ci]" && git push)
+      - run: echo "$(cat benchmark.log)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,16 @@
+[
+ {
+  "date": "2026-10-17",
+  "version": "1.1.0",
+  "gtFingerprint": "8c5d8b9b862b",
+  "f1": 0.9759,
+  "precision": 0.9759,
+  "recall": 0.9759,
+  "meanAbsCountError": 0,
+  "bandAgreement": null,
+  "bandChecked": 0,
+  "images": 1,
+  "truthBeans": 83,
+  "note": "no change"
+ }
+]

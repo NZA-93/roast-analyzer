@@ -32,6 +32,26 @@
     <div class="overlay-wrap"><canvas id="photo"></canvas></div>
     <div class="legend" id="legend"></div>
     <label class="toggle"><input type="checkbox" id="showOverlay" checked> Show bean overlay</label> <button class="btn ghost" id="zoom" aria-pressed="false">🔍 Zoom 2×</button>
+    <button class="btn" id="testToggle" aria-pressed="false" hidden>🧪 Test detection</button>
+    <div id="tester" class="tester" hidden>
+      <p class="muted">Correct the detector on this photo. Your corrections become ground truth: they give the scores below, are saved on this device, and when submitted they retune the detector for everyone.</p>
+      <div class="tools" id="tools" role="toolbar" aria-label="Correction tool"></div>
+      <p id="toolHelp" class="toolhelp"></p>
+      <div class="toolopts">
+        <label id="reasonWrap">Reason <select id="reason"><option value="crumb">crumb / fragment</option><option value="gap">gap / shadow</option><option value="glare">glare / plate</option><option value="other">other</option></select></label>
+        <label id="mergeWrap" hidden>Beans inside <input id="mergeN" type="number" min="2" max="9" value="2" inputmode="numeric"></label>
+        <label id="bandWrap" hidden>Correct band <select id="bandPick"></select></label>
+      </div>
+      <div id="liveMetrics" aria-live="polite"></div>
+      <label class="note">Note (optional) <input id="gtNote" type="text" placeholder="e.g. checked the left half only"></label>
+      <div class="row">
+        <button class="btn ghost" id="undo">↶ Undo</button>
+        <button class="btn ghost" id="resetGt">Reset</button>
+        <button class="btn ghost" id="exportGt">Export JSON</button>
+        <label class="btn ghost" for="importGt">Import JSON</label><input id="importGt" type="file" accept=".json,application/json" multiple hidden>
+        <button class="btn primary" id="submitGt" disabled>Submit feedback ↗</button>
+      </div>
+    </div>
     <div id="beanInfo" class="beaninfo">Tap a bean to see its measurement.</div>
   </section>
 
@@ -88,6 +108,12 @@
       <li>Roast index: L* → Agtron-like number via your calibration; bands use SCA-style tile boundaries.</li>
       <li>Outliers: robust z-score against the whole batch (median/MAD): quaker (very pale, low chroma), underdeveloped (pale), scorched (dark).</li>
     </ol>
+  </details>
+  <details open>
+    <summary><b>Detector</b></summary>
+    <p id="detector" class="muted">Loading detector info…</p>
+    <ul id="changelog" class="muted"></ul>
+    <p class="muted"><a href="metrics/history.json">Benchmark history</a> · <a href="https://github.com/NZA-93/roast-analyzer/tree/main/feedback">Ground truth (feedback/)</a> · <a href="https://github.com/NZA-93/roast-analyzer/issues?q=label%3Adetector-feedback">Submitted feedback</a></p>
   </details>
   <p class="muted"><a href="https://github.com/NZA-93/roast-analyzer">Source on GitHub</a> · <a href="reports/2026-10-17.json">Reference report 2026-10-17 (JSON)</a></p>
 </section>

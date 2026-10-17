@@ -1,6 +1,10 @@
 // Roast Analyzer core — pure JS, no dependencies. Works in browser and Node.
 // Input: {width,height,data:Uint8ClampedArray RGBA}. Output: per-bean measurements + label map.
 
+// Bump when the algorithm (not just tuned params) changes.
+export const ALGO_VERSION = '1.1';
+export const TUNABLE = ['bodySigma', 'nmsRadius', 'markerMin', 'openK', 'minBeanC', 'distW'];
+
 export const BANDS = [
   // Agtron-like (whole-bean, SCA tile scale) lower bounds, provisional
   // color = high-contrast overlay colour, tone = approximate real bean tone
@@ -250,7 +254,7 @@ export function analyzeImage(img, opts = {}) {
       bn.C = +Math.hypot(bn.a, bn.b).toFixed(2); bn.hue = +(Math.atan2(bn.b, bn.a) * 180 / Math.PI).toFixed(1); bn.agtron = +agtronFromL(bn.L, cal).toFixed(1); bn.band = BANDS[bandOf(bn.agtron)].name; }
     trend = { dLdx: +co[0][1].toFixed(2), dLdy: +co[0][2].toFixed(2) }; }
   const labelMap = new Int32Array(N); for (let i = 0; i < N; i++) if (lab[i]) labelMap[i] = keep[lab[i]];
-  return { width: w, height: h, beans, rejected, labelMap, debug: opts.debug ? { mask, markers, lab } : null, params: { plateRadius: +plateR.toFixed(1), beanRadius: +R.toFixed(2), Lthreshold: +thr.toFixed(1), chromaThreshold: +cthr.toFixed(1), wbGains: wb.map(g => +g.toFixed(3)), lightingTrend: trend, flatField: fit.map(f => f.map(v => +v.toFixed(4))), markers: K } };
+  return { width: w, height: h, beans, rejected, labelMap, debug: opts.debug ? { mask, markers, lab } : null, params: { plateRadius: +plateR.toFixed(1), beanRadius: +R.toFixed(2), Lthreshold: +thr.toFixed(1), chromaThreshold: +cthr.toFixed(1), wbGains: wb.map(g => +g.toFixed(3)), lightingTrend: trend, flatField: fit.map(f => f.map(v => +v.toFixed(4))), markers: K, tuned: Object.fromEntries(TUNABLE.filter(k => opts[k] != null).map(k => [k, opts[k]])) } };
 }
 
 export function stats(beans, cal = DEFAULT_CAL) {
