@@ -63,7 +63,8 @@ export function loadTruth(file) {
 
 // ---------- whole-plate recall from a partial (swipe) review — ONE implementation, used by swipe-core and the benchmark ----------
 export const RECALL_MIN_RANDOM = 10;     // random cards needed before precision (and so recall) is quoted
-export const RECALL_MIN_SHARE = 0.2;     // share of the plate's gap area the gap tiles must cover
+// Minimum share of the plate's gap area the (pooled) gap tiles must cover before recall is quoted. Owned by the Critic: change here.
+export const RECALL_MIN_SHARE = 0.20;
 // Wilson score interval for k successes out of n.
 export function wilson(k, n, z = 1.96) {
   if (!n) return [0, 1]; const p = k / n, d = 1 + z * z / n, c = p + z * z / (2 * n), h = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n));
@@ -91,4 +92,10 @@ export function plateRecall({ tpRandom, nRandom, detections, tiles, totalGapArea
   const rec = (p, m) => { const tp = detections * p; return tp + m > 0 ? tp / (tp + m) : 1; };
   out.missesEstimated = r4(miss); out.recall = r4(rec(P, miss)); out.ci = [r4(rec(pLo, tapHi * scale)), r4(rec(pHi, tapLo * scale))]; out.confidence = 'ok';
   return out;
+}
+
+// Plain-language recall line for reports and the UI: never a bare null or a lone interval.
+export function recallText(r) {
+  if (!r || r.recall == null) return `Recall: not enough answers yet (n=${r?.nRandom | 0}${r?.share != null ? `, gaps checked ${Math.round(r.share * 100)}%` : ''})`;
+  return `Recall ${(r.recall * 100).toFixed(1)}% (95% ${(r.ci[0] * 100).toFixed(1)}–${(r.ci[1] * 100).toFixed(1)}%, n=${r.nRandom}, gaps checked ${Math.round(r.share * 100)}%)`;
 }

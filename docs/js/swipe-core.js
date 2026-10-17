@@ -120,6 +120,23 @@ export function scoreBatch(batch, detections) {
   return out;
 }
 
+// Pool gap-tile reviews from several sessions on the SAME photo + detector params. Tiles come from a fixed grid, so they are
+// deduped by rectangle (the later review wins). Each session drew uniformly from the stratum's not-yet-reviewed tiles, so
+// the union is a stratified simple random sample of K_s distinct tiles out of N_s, and the pooled inclusion probability of
+// every reviewed tile is K_s / N_s (allocation never depends on what was tapped). Sessions whose grid/strata differ from the
+// latest one (other params) are dropped. sessions: [{ paramsHash, totalGapArea, strata:[{name,N}], tiles:[{rect,gapArea,stratum,missed,missedPts?}] }]
+export const tileKey = r => r.join(',');
+export function poolGapTiles(sessions) {
+  const ok = (sessions || []).filter(x => x && Array.isArray(x.tiles) && Array.isArray(x.strata)); if (!ok.length) return null;
+  const ref = ok[ok.length - 1], sig = x => `${x.paramsHash}|${x.totalGapArea}|${x.strata.map(st => st.name + ':' + st.N).join(';')}`;
+  const same = ok.filter(x => sig(x) === sig(ref)), byKey = new Map();
+  for (const x of same) for (const t of x.tiles) byKey.set(tileKey(t.rect), { ...t });
+  const N = Object.fromEntries(ref.strata.map(st => [st.name, st.N])), K = {};
+  for (const t of byKey.values()) K[t.stratum] = (K[t.stratum] || 0) + 1;
+  const tiles = [...byKey.values()].map(t => ({ ...t, prob: +(K[t.stratum] / N[t.stratum]).toFixed(6) }));
+  return { tiles, totalGapArea: ref.totalGapArea, strata: ref.strata.map(st => ({ ...st, K: K[st.name] || 0 })), sessions: same.length, dropped: ok.length - same.length, reviewedKeys: [...byKey.keys()] };
+}
+
 // Server-side + client-side schema check. Returns [] when valid, else a list of problems.
 export function validateBatch(b) {
   const e = []; const isNum = v => typeof v === 'number' && Number.isFinite(v); const hex = (v, n) => typeof v === 'string' && new RegExp(`^[0-9a-f]{${n}}$`).test(v);

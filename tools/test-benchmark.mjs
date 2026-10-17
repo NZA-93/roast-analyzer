@@ -20,7 +20,7 @@ const plain = run('--dry'); console.log(plain.trim().split('\n').slice(0, 5).joi
 assert.match(plain, /skip swipe\/s0-targeted\.json: biased/); assert.match(plain, /skipped biased: 2/);
 assert.match(plain, /skip top-swipe\.json: swipe-review files belong in feedback\/swipe/);
 assert.match(plain, /holdout: full-2\.json/); assert.match(plain, /F1 1 /, 'swipe files never enter F1');
-assert.match(plain, /swipe swipe\/s0-random\.json: precision 1 \(n=10, 95% \[0\.\d+,1\]\) · recall 1 95% \[0\.\d+,1\] · ok/, 'swipe recall reported via plateRecall with interval');
+assert.match(plain, /swipe 6ecd408b1be6 \(1 session\): precision 1 \(n=10, 95% 0\.\d+–1\) · Recall 100\.0% \(95% \d+\.\d–100\.0%, n=10, gaps checked 50%\)/, 'swipe recall reported as text via plateRecall');
 // tuning refuses a single photo
 const one = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-one-')); fs.copyFileSync(path.join(dir, 'full-1.json'), path.join(one, 'full-1.json'));
 const r1 = run2({ RA_FEEDBACK: one }, '--tune', '--dry'); assert.equal(r1.code, 2); assert.match(r1.out, /REFUSING to tune: ground truth covers 1 photo/);

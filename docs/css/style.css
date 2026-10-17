@@ -92,3 +92,4 @@ body.noscroll{overflow:hidden}
 .done{justify-content:center;gap:6px}.donemsg{font-size:1.4rem;font-weight:700;text-align:center}
 @media (min-width:600px){.sw.no,.sw.yes{width:88px;height:88px;min-width:72px;min-height:72px;font-size:2.4rem}.swhelp{font-size:20px}}
 .phototoggle{display:flex;align-items:center;gap:12px;min-height:56px;font-size:1.05rem}.phototoggle input{width:28px;height:28px}
+.donepreview{opacity:.8;font-size:.95rem;text-align:center;max-width:32rem}
