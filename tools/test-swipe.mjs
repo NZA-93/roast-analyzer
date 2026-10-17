@@ -2,6 +2,8 @@
 // random and targeted answers land in separate scores, selection is 70/30 and the schema check rejects junk.
 import assert from 'assert/strict';
 import { toGroundTruth, scoreBatch, selectCards, validateBatch, makeRecord, BATCH_SCHEMA, estimatedMisses, reviewedShare, contentHash } from '../docs/js/swipe-core.js';
+import { plateRecall, wilson, RECALL_MIN_RANDOM, RECALL_MIN_SHARE, recallText, sessionMisses } from '../docs/js/evaluate.js';
+import { pooledRecall, poolSessions } from '../docs/js/swipe-core.js';
 import { loadTruth, score, GT_SCHEMA } from '../docs/js/evaluate.js';
 let n = 0; const t = (name, fn) => { fn(); n++; console.log('ok -', name); };
 
@@ -19,7 +21,8 @@ const answers = [
 ];
 const batch = { schema: BATCH_SCHEMA, id: 'test-batch-1', createdAt: '2026-10-17T12:00:00+02:00', image, beanRadius: R, detectorVersion: ver, paramsHash: ph, params: {},
   answers, missed: [{ x: 380, y: 280 }, { x: 20, y: 280 }], missedScreenShown: true, detectionsOnPlate: 12,
-  colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1.1, 1, 0.9], gapTiles: [{ rect: [0, 0, 400, 300], gapArea: 1000, missed: 2 }], totalGapArea: 1000 };
+  colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1.1, 1, 0.9], gapTiles: [{ rect: [0, 0, 400, 300], gapArea: 1000, stratum: 'dense', prob: 1, missed: 2 }], totalGapArea: 1000,
+  gapSelection: { method: 'stratified-random', seed: 1, strata: [{ name: 'dense', N: 1, k: 1 }] } };
 
 t('batch passes schema', () => assert.deepEqual(validateBatch(batch), []));
 
@@ -45,24 +48,39 @@ t('random vs targeted scored separately; count error not computed', () => {
   assert.equal(s.all.tp, s.random.tp + s.targeted.tp);
   assert.equal(toGroundTruth(batch, 'targeted').source.biased, true);
   for (const k of ['random', 'targeted', 'all']) assert.equal(s[k].countError, null);
-  // recall from the random precision over the whole plate: 12 × 0.75 = 9 TP vs 2 misses
-  assert.equal(s.random.recall, +(9 / 11).toFixed(4));
+  // only 4 random cards: recall is withheld, never filled in from targeted precision
+  assert.equal(s.random.recall, null); assert.match(s.recall.reason, /only 4 random cards/);
 });
 
-t('Critic case: 100 detections, 2 misses, 6 random cards all correct -> recall 0.98', () => {
-  const d = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, x: 20 + 30 * (i % 10), y: 20 + 30 * Math.floor(i / 10), L: 40, a: 8, b: 20, glare: 0 }));
+t('misses scaled by inclusion probability; share null for zero gap area', () => {
+  const bt = { ...batch, gapTiles: [{ rect: [0, 0, 100, 100], gapArea: 250, stratum: 'dense', prob: 0.25, missed: 2 }], totalGapArea: 1000 };
+  assert.equal(reviewedShare(bt), 0.25); assert.equal(estimatedMisses(bt), 8); assert.equal(reviewedShare({ ...bt, totalGapArea: 0 }), null);
+  assert.equal(toGroundTruth(bt, 'random').source.reviewedShare, 0.25); assert.equal(toGroundTruth(bt, 'random').source.gapTiles[0].prob, 0.25);
+  assert.ok(validateBatch({ ...bt, gapTiles: [{ ...bt.gapTiles[0], prob: undefined }] }).includes('gapTiles'));
+});
+const plate = (nRandom, o = {}) => { const d = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, x: 20 + 30 * (i % 10), y: 20 + 30 * Math.floor(i / 10), L: 40, a: 8, b: 20, glare: 0 }));
   const img = { name: 'p.jpg', sha256: 'c'.repeat(64), width: 400, height: 400 };
-  const ans = d.slice(0, 6).map(b => makeRecord({ image: img, bean: b, detectorVersion: ver, paramsHash: ph, answer: 'correct', pick: 'random', R }));
-  const bt = { ...batch, image: img, answers: ans, missed: [{ x: 390, y: 5 }, { x: 5, y: 390 }], detectionsOnPlate: 100, gapTiles: [{ rect: [0, 0, 400, 400], gapArea: 500, missed: 2 }], totalGapArea: 500 };
-  assert.deepEqual(validateBatch(bt), []);
+  const ans = d.slice(0, nRandom).map(b => makeRecord({ image: img, bean: b, detectorVersion: ver, paramsHash: ph, answer: 'correct', pick: 'random', R }));
+  return [{ ...batch, image: img, answers: ans, missed: [{ x: 390, y: 5 }, { x: 5, y: 390 }], detectionsOnPlate: 100, gapTiles: [{ rect: [0, 0, 400, 400], gapArea: 500, stratum: 'dense', prob: 1, missed: 2 }], totalGapArea: 500, ...o }, d]; };
+t('Critic case: 100 detections, 2 misses, full gap review, 10 random cards all correct -> recall 0.98 with interval', () => {
+  const [bt, d] = plate(10); assert.deepEqual(validateBatch(bt), []);
   const s = scoreBatch(bt, d); assert.equal(s.random.precision, 1); assert.equal(+s.random.recall.toFixed(2), 0.98); assert.equal(s.random.countError, null);
+  assert.equal(s.recall.confidence, 'ok'); assert.equal(s.recall.nRandom, 10); assert.ok(s.recall.ci[0] < 0.98 && s.recall.ci[1] >= 0.98);
 });
-
-t('misses scaled by the reviewed gap share', () => {
-  const bt = { ...batch, gapTiles: [{ rect: [0, 0, 100, 100], gapArea: 250, missed: 2 }], totalGapArea: 1000 };
-  assert.equal(reviewedShare(bt), 0.25); assert.equal(estimatedMisses(bt), 8);
-  const s = scoreBatch(bt, dets); assert.equal(s.missesEstimated, 8); assert.equal(s.random.recall, +(9 / 17).toFixed(4)); // 12×0.75 = 9 TP vs 8 est. misses
-  assert.equal(toGroundTruth(bt, 'random').source.reviewedShare, 0.25);
+t('recall withheld: 6 random cards, tiny gap share, zero gap area, no random cards', () => {
+  const [b6, d] = plate(6); assert.equal(scoreBatch(b6, d).random.recall, null);
+  const [bs] = plate(10, { gapTiles: [{ rect: [0, 0, 8, 8], gapArea: 10, stratum: 'dense', prob: 0.01, missed: 0 }], missed: [], totalGapArea: 100000 }); const ss = scoreBatch(bs, d);
+  assert.equal(ss.random.recall, null); assert.match(ss.recall.reason, /cover 0\.0% of the gap area/);
+  const [bz] = plate(10, { gapTiles: [], missed: [], totalGapArea: 0 }); const sz = scoreBatch(bz, d); assert.equal(sz.reviewedShare, null); assert.equal(sz.random.recall, null);
+  const [b0] = plate(0); const tg = d.slice(0, 8).map(b => makeRecord({ image: b0.image, bean: b, detectorVersion: ver, paramsHash: ph, answer: 'correct', pick: 'targeted', R }));
+  assert.equal(scoreBatch({ ...b0, answers: tg }, d).random.recall, null, 'no fallback to targeted precision');
+});
+t('Wilson interval + Horvitz–Thompson scaling by inclusion probability', () => {
+  const [lo, hi] = wilson(9, 10); assert.ok(lo > 0.59 && lo < 0.6 && hi > 0.98);
+  const r = plateRecall({ tpRandom: 10, nRandom: 10, detections: 100, sessions: [{ tiles: [{ rect: [0, 0, 1, 1], gapArea: 300, prob: 0.25, missed: 1 }, { rect: [1, 0, 2, 1], gapArea: 200, prob: 0.5, missed: 1 }], totalGapArea: 1000 }] });
+  assert.equal(r.missesEstimated, 6); assert.equal(r.recall, +(100 / 106).toFixed(4)); assert.equal(r.share, 0.5);
+  assert.equal(plateRecall({ tpRandom: 10, nRandom: 10, detections: 100, sessions: [{ tiles: [{ rect: [0, 0, 1, 1], gapArea: 500, missed: 1 }], totalGapArea: 1000 }] }).recall, null, 'missing probabilities -> null');
+  assert.equal(RECALL_MIN_RANDOM, 10);
 });
 
 t('records carry raw L*/a*/b*, glare; schema refuses nulls; colour pipeline stored', async () => {
@@ -93,4 +111,55 @@ t('schema rejects bad batches', () => {
   assert.ok(validateBatch({ ...batch, missed: [{ x: 9999, y: 1 }] }).length);
 });
 const h1 = await contentHash(batch), h2 = await contentHash({ ...batch, id: 'other-id-2', createdAt: 'x' }); assert.equal(h1, h2); n++; console.log('ok - content hash ignores id/time (dedupe)');
+// synthetic plate shared by the gap-tile tests: dense centre, sparse rim, empty plate around
+const { gapTiles } = await import('../docs/js/swipe.js');
+const plateS = (() => { const W = 900, H = 900, beans = []; let id = 1;
+  for (let y = 5; y < H; y += 20) for (let x = 5; x < W; x += 20) { const r = Math.hypot(x - 450, y - 450); if (r < 360 && ((x * 7 + y * 13) % 100) < (r < 200 ? 90 : r < 300 ? 50 : 15)) beans.push({ id: id++, x, y }); }
+  const labelMap = new Int32Array(W * H); beans.forEach(b => { for (let yy = b.y - 7; yy <= b.y + 7; yy++) for (let xx = b.x - 7; xx <= b.x + 7; xx++) if (xx >= 0 && yy >= 0 && xx < W && yy < H) labelMap[yy * W + xx] = b.id; });
+  return { width: W, height: H, beans, labelMap, params: { beanRadius: 10 } }; })();
+t('gap tiles: 4 strata incl. empty plate, independent draws, prob = k/N, schema enforces it', () => {
+  const g = gapTiles(plateS, 4, 3); assert.equal(g.tiles.length, 4); assert.equal(g.selection.method, 'stratified-random');
+  assert.deepEqual(g.selection.strata.map(x => x.name), ['empty plate', 'sparse/rim', 'medium', 'dense']);
+  for (const t2 of g.tiles) { const st = g.selection.strata.find(x => x.name === t2.stratum); assert.equal(t2.prob, +(st.k / st.N).toFixed(6)); }
+  assert.notDeepEqual(gapTiles(plateS, 4, 4).tiles.map(t2 => t2.rect), g.tiles.map(t2 => t2.rect), 'random, not the 4 largest');
+  const bt = { ...batch, image: { ...image, width: 900, height: 900 }, gapTiles: g.tiles.map(t2 => ({ ...t2, missed: 0 })), missed: [], totalGapArea: g.total, gapSelection: g.selection };
+  assert.deepEqual(validateBatch(bt), []);
+  assert.ok(validateBatch({ ...bt, gapTiles: bt.gapTiles.map((t2, i) => i ? t2 : { ...t2, prob: Math.min(1, t2.prob * 2) }) }).some(e => /k\/N/.test(e)), 'wrong prob rejected');
+  assert.ok(validateBatch({ ...bt, gapTiles: bt.gapTiles.slice(1), gapSelection: g.selection }).some(e => /k\/N/.test(e)), 'tile count must equal k');
+});
+t('HT unbiased with UNEVEN misses inside strata (single session and pooled average)', () => {
+  // ground truth: misses concentrated in a few tiles of each stratum (0 in most, up to 5 in some)
+  const all = gapTiles(plateS, 9999, 1).tiles, truth = new Map(all.map((t2, i) => [t2.rect.join(','), (i * 7919) % 11 === 0 ? 1 + (i % 5) : 0]));
+  const trueTotal = [...truth.values()].reduce((a, b) => a + b, 0); assert.ok(trueTotal > 5);
+  const est = seed => { const g = gapTiles(plateS, 4, seed); return { tiles: g.tiles.map(t2 => ({ ...t2, missed: truth.get(t2.rect.join(',')) })), totalGapArea: g.total }; };
+  const N = 3000; let one = 0, pooled = 0;
+  for (let k = 1; k <= N; k++) { one += sessionMisses(est(k).tiles); const a = est(N + 2 * k), b = est(N + 2 * k + 1); pooled += (sessionMisses(a.tiles) + sessionMisses(b.tiles)) / 2; }
+  assert.ok(Math.abs(one / N - trueTotal) / trueTotal < 0.06, `single-session mean ${one / N} vs truth ${trueTotal}`);
+  assert.ok(Math.abs(pooled / N - trueTotal) / trueTotal < 0.05, `pooled mean ${pooled / N} vs truth ${trueTotal}`);
+  // and a deliberately biased estimator (ignoring prob, scaling by share) does NOT pass this test -> the test can fail
+  let naive = 0; for (let k = 1; k <= N; k++) { const e = est(k), sh = e.tiles.reduce((a, t2) => a + t2.gapArea, 0) / e.totalGapArea; naive += e.tiles.reduce((a, t2) => a + t2.missed, 0) / sh; }
+  assert.ok(Math.abs(naive / N - trueTotal) / trueTotal > 0.06, `naive estimator should be off (got ${naive / N} vs ${trueTotal})`);
+});
+t('pooling: same sha + detector version + params; union coverage; mean HT; random cards pooled; first duplicate wins', () => {
+  const mkB = (seed, id, extra = {}) => { const g = gapTiles(plateS, 4, seed); const img = { ...image, width: 900, height: 900 };
+    const ans = plateS.beans.slice(seed * 4, seed * 4 + 4).map(b => makeRecord({ image: img, bean: { ...b, L: 40, a: 8, b: 20, glare: 0 }, detectorVersion: ver, paramsHash: ph, answer: 'correct', pick: 'random', R }));
+    return { ...batch, id, image: img, answers: ans, detectionsOnPlate: plateS.beans.length, gapTiles: g.tiles.map(t2 => ({ ...t2, missed: 0 })), missed: [], totalGapArea: g.total, gapSelection: g.selection, ...extra }; };
+  const b1 = mkB(1, 'b-1'), b2 = mkB(2, 'b-2'), b3 = mkB(3, 'b-3'), other = mkB(4, 'b-4', { paramsHash: 'ffffff000000' });
+  const groups = poolSessions([b1, b2, b3, other, { ...b1 }]); assert.equal(groups.length, 2);
+  const g = groups.find(x => x.key.endsWith(ph)); assert.equal(g.batches, 3, 'duplicate id ignored, other params in another group'); assert.equal(g.nRandom, 12);
+  const share1 = plateRecall({ tpRandom: 4, nRandom: 4, detections: 100, sessions: g.sessions.slice(0, 1) }).share, shareAll = plateRecall({ tpRandom: 4, nRandom: 4, detections: 100, sessions: g.sessions }).share;
+  assert.ok(shareAll > share1, 'coverage grows with sessions (union of distinct tiles)');
+  const pr = pooledRecall([b1, b2, b3]); assert.equal(pr.length, 1); assert.equal(pr[0].nRandom, 12);
+  // grow sessions until coverage ≥ RECALL_MIN_SHARE: recall then becomes available
+  const bs = [b1]; let k = 10; while ((pooledRecall(bs)[0].share ?? 0) < RECALL_MIN_SHARE && bs.length < 20) bs.push(mkB(k, `b-${k++}`));
+  const fin = pooledRecall(bs)[0]; assert.ok(fin.share >= RECALL_MIN_SHARE); assert.notEqual(fin.recall, null); assert.equal(fin.sessions, bs.length);
+  console.log(`   (coverage ${Math.round(pooledRecall([b1])[0].share * 100)}% after 1 session, ${Math.round(fin.share * 100)}% after ${bs.length}; ${recallText(fin)})`);
+});
+t('recall text is plain, wide intervals flagged', () => {
+  assert.equal(recallText({ recall: null, nRandom: 6, share: 0.12 }), 'Recall: not enough answers yet (n=6, gaps checked 12%)');
+  assert.match(recallText({ recall: 0.98, ci: [0.9, 1], nRandom: 12, share: 0.3, wide: false }), /^Recall 98\.0% \(95% 90\.0–100\.0%, n=12, gaps checked 30%\)$/);
+  assert.match(recallText({ recall: 0.9, ci: [0.6, 1], nRandom: 12, share: 0.3, wide: true }), /wide interval/);
+  const r = plateRecall({ tpRandom: 10, nRandom: 10, detections: 100, sessions: [{ tiles: [{ rect: [0, 0, 1, 1], gapArea: 300, prob: 0.05, missed: 2 }], totalGapArea: 1000 }] });
+  assert.equal(r.wide, true); assert.equal(RECALL_MIN_SHARE, 0.20);
+});
 console.log(`\n${n} tests passed`);

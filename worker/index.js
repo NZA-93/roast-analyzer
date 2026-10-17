@@ -39,8 +39,11 @@ export default {
       await gh.ensureBranch();
       if (await gh.exists(`feedback/swipe/raw/${base}.json`)) return reply(409, { error: 'duplicate batch', contentHash: ch });
       const files = [];
-      if (batch.photo && !known) { const p = `feedback/images/${batch.image.sha256.slice(0, 16)}.jpg`;
-        if (!(await gh.exists(p))) files.push([p, batch.photo.split(',')[1]]); batch.photoPath = p; }
+      if (batch.photo && !known) {
+        const info = await inspectImage(batch.photo, batch.image); if (info.error) return reply(422, { error: 'bad photo', detail: info.error });
+        const p = `feedback/images/${batch.image.sha256.slice(0, 16)}.${info.type}`;
+        if (!(await gh.exists(p))) files.push([p, batch.photo.split(',')[1]]); batch.photoPath = p;
+        batch.image = { ...batch.image, originalSha256: batch.image.sha256, uploadedSha256: info.sha256, uploadedWidth: info.width, uploadedHeight: info.height }; }
       const { photo, ...raw } = batch; files.push([`feedback/swipe/raw/${base}.json`, b64(JSON.stringify(raw, null, 1))]);
       for (const sub of ['random', 'targeted']) { const gt = toGroundTruth(batch, sub); if (gt.detectedAtReview || gt.corrections.added.length) files.push([`feedback/swipe/${base}-${sub}.json`, b64(JSON.stringify(gt, null, 1))]); }
       for (const [p, c] of files) await gh.put(p, c, `Swipe feedback ${ch} (${batch.answers.length} answers)`);
@@ -65,4 +68,25 @@ function github(env) {
       if (l.length) return l[0].html_url;
       return ok(await call('POST', '/pulls', { title: 'Swipe-review feedback (auto)', head: br, base: baseBr, body: 'Batches from the swipe review, validated by the feedback Worker. New batches are added to this PR. Merge to let the benchmark use them.' }), 'create PR').html_url; },
   };
+}
+
+// Check the uploaded photo really is a JPEG/PNG with sane dimensions matching the analysed frame (structure-level check:
+// JPEG SOI/SOF/EOI markers, PNG signature/IHDR/IEND). Returns {type,width,height,sha256} or {error}.
+export async function inspectImage(dataUrl, image) {
+  let bytes; try { const bin = atob(dataUrl.split(',')[1] || ''); bytes = Uint8Array.from(bin, c => c.charCodeAt(0)); } catch { return { error: 'photo is not valid base64' }; }
+  let type = null, width = 0, height = 0;
+  if (bytes[0] === 0xFF && bytes[1] === 0xD8) { type = 'jpg';
+    if (!(bytes[bytes.length - 2] === 0xFF && bytes[bytes.length - 1] === 0xD9)) return { error: 'JPEG is truncated (no end marker)' };
+    for (let i = 2; i + 9 < bytes.length;) { if (bytes[i] !== 0xFF) return { error: 'JPEG marker structure is broken' }; const m = bytes[i + 1], len = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (m >= 0xC0 && m <= 0xCF && ![0xC4, 0xC8, 0xCC].includes(m)) { height = (bytes[i + 5] << 8) | bytes[i + 6]; width = (bytes[i + 7] << 8) | bytes[i + 8]; break; }
+      if (m === 0xD8 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; } i += 2 + len; } }
+  else if ([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A].every((v, i) => bytes[i] === v)) { type = 'png';
+    const dv = new DataView(bytes.buffer); if (String.fromCharCode(...bytes.subarray(12, 16)) !== 'IHDR') return { error: 'PNG has no IHDR' };
+    width = dv.getUint32(16); height = dv.getUint32(20); if (String.fromCharCode(...bytes.subarray(bytes.length - 8, bytes.length - 4)) !== 'IEND') return { error: 'PNG is truncated' }; }
+  else return { error: 'photo is not a JPEG or PNG' };
+  if (!width || !height) return { error: 'could not read photo dimensions' };
+  if (Math.max(width, height) > 4000 || Math.min(width, height) < 200) return { error: `photo size ${width}×${height} is out of range` };
+  if (Math.abs(width - image.width) > 1 || Math.abs(height - image.height) > 1) return { error: `photo is ${width}×${height}, answers were made on ${image.width}×${image.height}` };
+  const h = await crypto.subtle.digest('SHA-256', bytes); const sha256 = [...new Uint8Array(h)].map(x => x.toString(16).padStart(2, '0')).join('');
+  return { type, width, height, sha256 };
 }
