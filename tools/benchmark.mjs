@@ -71,8 +71,10 @@ if (TUNE) {
     const p = { ...best.params, [k]: v }; const m = evaluate(p);
     if (m.f1 > best.m.f1 + 1e-4 || (m.f1 === best.m.f1 && m.meanAbsCountError < best.m.meanAbsCountError - 1e-4)) { best = { params: p, m }; console.log(`  better: ${k}=${v} → F1 ${m.f1}`); } }
   if (best.m.f1 >= base.f1 + MIN_GAIN) {
-    const c0 = demoCount(curParams), c1 = demoCount(best.params); const swing = Math.abs(c1 - c0) / c0;
-    if (swing > STABILITY_TOL) note = `rejected tuned params: demo bean count would swing ${(swing * 100).toFixed(1)}% (${c0}→${c1}), likely overfitting`;
+    // unlabeled stability: the change in bean count on the (unlabeled) demo photos must match what the ground truth asks for
+    const c0 = demoCount(curParams), c1 = demoCount(best.params); const swing = (c1 - c0) / c0;
+    const det0 = base.per.reduce((s, p) => s + p.detected, 0), wanted = base.truthBeans / Math.max(1, det0) - 1;
+    if (Math.abs(swing - wanted) > STABILITY_TOL) note = `rejected tuned params: demo bean count would change ${(swing * 100).toFixed(1)}% (${c0}→${c1}) but ground truth asks for ${(wanted * 100).toFixed(1)}%, likely overfitting`;
     else { changed = true; note = `tuned: F1 ${base.f1} → ${best.m.f1} (demo count ${c0}→${c1})`; }
   } else note = `tuning found no gain ≥ ${MIN_GAIN} (best ${best.m.f1})`;
   console.log(note);
