@@ -1,0 +1,14 @@
+name = "roast-feedback"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+REPO = "NZA-93/roast-analyzer"
+BASE = "main"
+BRANCH = "swipe-feedback"
+ALLOWED_ORIGIN = "https://nza-93.github.io"
+
+# REQUIRED rate-limit store: `wrangler kv namespace create RATE`, then paste the id below (the Worker returns 503 without it).
+[[kv_namespaces]]
+binding = "RATE"
+id = "<kv-namespace-id>"

@@ -235,10 +235,13 @@ export function analyzeImage(img, opts = {}) {
     const why = Cm < (opts.minBeanC ?? 0.55) * cthr ? 'shadow/gap' : Lm > thr + 6 && Cm < cthr ? 'plate glare' : null;
     if (why) { rejected.push({ x: cx0, y: cy0, area: a, reason: why }); continue; }
     const ag = agtronFromL(Lm, cal);
+    // review helpers: glare = share of bright low-chroma (specular/plate) pixels; conf = margin from the reject rules and typical size
+    const glare = +(src.filter(i => L[i] > hi - 3 && Math.hypot(A[i], B[i]) < 10).length / src.length).toFixed(3);
+    const conf = +Math.max(0, Math.min(1, (Cm - (opts.minBeanC ?? 0.55) * cthr) / cthr, 1 - Math.abs(Math.log(a / medA)) / Math.log(3))).toFixed(3);
     keep[l] = beans.length + 1;
     beans.push({ id: beans.length + 1, x: +cx.toFixed(1), y: +cy.toFixed(1), area: a, bbox: [minx[l], miny[l], maxx[l], maxy[l]],
       L: +Lm.toFixed(2), a: +am.toFixed(2), b: +bm.toFixed(2), C: +Math.hypot(am, bm).toFixed(2), hue: +(Math.atan2(bm, am) * 180 / Math.PI).toFixed(1),
-      agtron: +ag.toFixed(1), band: BANDS[bandOf(ag)].name });
+      agtron: +ag.toFixed(1), band: BANDS[bandOf(ag)].name, glare, conf, sizeRatio: +(a / medA).toFixed(3) });
   }
   // Spatial detrend: beans are spread at random, so any linear trend of bean colour with position is lighting
   // (light from one side, the phone's shadow), not roast. Remove the planar trend, keep the mean.
@@ -249,7 +252,7 @@ export function analyzeImage(img, opts = {}) {
       for (let r = 0; r < 3; r++) { for (let c = 0; c < 3; c++) S[r][c] += v[r] * v[c]; for (let k = 0; k < 3; k++) T[k][r] += v[r] * y[k]; } }
     const solve = (M, y) => { const m = M.map((r, i) => [...r, y[i]]); for (let i = 0; i < 3; i++) { for (let k = 0; k < 3; k++) if (k !== i) { const f = m[k][i] / m[i][i]; for (let c = i; c < 4; c++) m[k][c] -= f * m[i][c]; } } return m.map((r, i) => r[3] / r[i]); };
     const co = T.map(t => solve(S, t)); const mx = beans.reduce((s, b) => s + (b.x - w / 2) / sc, 0) / beans.length, my = beans.reduce((s, b) => s + (b.y - h / 2) / sc, 0) / beans.length;
-    for (const bn of beans) { const dx = (bn.x - w / 2) / sc - mx, dy = (bn.y - h / 2) / sc - my; bn.Lraw = bn.L;
+    for (const bn of beans) { const dx = (bn.x - w / 2) / sc - mx, dy = (bn.y - h / 2) / sc - my; bn.Lraw = bn.L; bn.araw = bn.a; bn.braw = bn.b;
       bn.L = +(bn.L - co[0][1] * dx - co[0][2] * dy).toFixed(2); bn.a = +(bn.a - co[1][1] * dx - co[1][2] * dy).toFixed(2); bn.b = +(bn.b - co[2][1] * dx - co[2][2] * dy).toFixed(2);
       bn.C = +Math.hypot(bn.a, bn.b).toFixed(2); bn.hue = +(Math.atan2(bn.b, bn.a) * 180 / Math.PI).toFixed(1); bn.agtron = +agtronFromL(bn.L, cal).toFixed(1); bn.band = BANDS[bandOf(bn.agtron)].name; }
     trend = { dLdx: +co[0][1].toFixed(2), dLdy: +co[0][2].toFixed(2) }; }
