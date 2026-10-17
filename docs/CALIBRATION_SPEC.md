@@ -16,7 +16,11 @@ For: **Bean Vision Developer**. Scope: `docs/js/analyzer.js`, `docs/js/app.js`, 
 - Fit: monotone non-decreasing in L*. Use **isotonic regression** (PAVA) followed by **monotone PCHIP** (Fritsch–Carlson) interpolation through the pooled points. With N = 2 it reduces to the current straight line.
 - Error: **leave-one-out** error in Agtron units (RMSE and max |error|), stored with the fit and shown in the UI.
 - Range: outside `[min L*, max L*]` of the references, **clamp** to the end values and show a **warning** ("outside calibrated range") on that bean, sample and batch.
-- Labels: with no user references (provisional default), every Agtron value and band is labelled **"uncalibrated estimate"**.
+- Flat runs: where isotonic pooling merges references into a flat run (equal Agtron over an L* interval), **flag it** in the fit result and the UI. It means those references disagree with monotonicity or can't be told apart, so re-photograph them or add a reference in that range.
+- Labels by calibration level:
+  - No user references (provisional default) or **N < 5**, or no leave-one-out error reported yet: **"uncalibrated estimate"**. Exception below.
+  - **2–4 references** with a reported leave-one-out error: **"partial calibration"**, shown with that error.
+  - **N ≥ 5** with a reported leave-one-out error: calibrated (show the error, see Calibrate UX).
 - Tests: monotonicity for random point sets; N = 2 equals the current line; known LOO values on a fixture.
 
 ## S2: Named profiles
@@ -44,9 +48,19 @@ For: **Bean Vision Developer**. Scope: `docs/js/analyzer.js`, `docs/js/app.js`, 
 - Detect a ColorChecker (24-patch) or a grey card in frame; sample patch medians in **linear sRGB**, avoiding the edges.
 - Fit a **3×3 CCM** (least squares, optionally weighted to the neutrals) from the measured patches to the reference values in linear sRGB (D65), per image; apply it before the Lab conversion.
 - Fallback: if no card is found or the fit fails acceptance, use the current plate path and flag the image "plate-only".
-- Acceptance on the patches: **mean ΔE00 ≤ 2 and max ΔE00 ≤ 4**; otherwise fall back and warn.
+- Acceptance is judged on **held-out patches**: leave-one-out over the patches, or fit on 18 and test on the other 6. Report **both in-sample and held-out ΔE00** (mean and max). Apply the thresholds to the **held-out** numbers: **mean ΔE00 ≤ 2 and max ΔE00 ≤ 4**; otherwise fall back and warn.
 - With a card, the absolute white comes from the card, which **replaces the `ref = 0.80` assumption**; the plate is still used for flat-field (spatial falloff).
 - Store the card neutrals in `cardBaseline` for S3.
+
+## Calibrate UX
+
+1. **One reference per screen:** take or upload the photo, type the known Agtron value on a numeric keypad (`inputmode="decimal"`), progress shown as "3 of 6". Next and Back buttons are at least **48 px** tall and wide.
+2. **Plain-language result:** e.g. "Typical error ±2 Agtron, worst ±4" (typical = leave-one-out RMSE, worst = leave-one-out max), with a coloured tag. No "RMSE" or other jargon on screen. Proposed thresholds (**starting values, to be tuned on real data**):
+   - **Green / good:** typical ≤ 2 and worst ≤ 4
+   - **Amber / usable:** typical ≤ 4 and worst ≤ 7
+   - **Red / redo:** anything worse
+3. **Warnings:** drift and out-of-range warnings appear as **one amber banner per batch**. Tapping it lists the affected beans or samples. No per-bean badge.
+4. **Status tag:** an "Uncalibrated estimate" tag (or "Partial calibration", per S1), at **≥ 14 px**, next to every Agtron number and band wherever they appear.
 
 ## Small fixes
 
