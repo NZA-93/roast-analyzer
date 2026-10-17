@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2b1a10">
+<title>Roast Analyzer — bean-by-bean colour map</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☕</text></svg>">
+</head>
+<body>
+<header>
+  <h1>☕ Roast Analyzer</h1>
+  <p class="sub">Photograph roasted beans on a white plate. Every bean is found, colour-measured and placed on a roast map. Runs 100% in your browser; photos never leave your device.</p>
+</header>
+
+<section class="actions">
+  <label class="btn primary" for="files">📷 Add photos</label>
+  <input id="files" type="file" accept="image/*" multiple hidden>
+  <button class="btn" id="demo">Load demo batch (17 Oct 2026, 4 samples)</button>
+  <button class="btn ghost" id="clear" hidden>Clear</button>
+  <p class="hint">Tips: one layer of beans on a plain white plate, daylight or one even light, no flash, phone straight above. Add several photos of the same batch — they are merged into one report.</p>
+  <div id="status" role="status" aria-live="polite"></div>
+</section>
+
+<main id="report" hidden>
+  <section class="cards" id="summary"></section>
+
+  <section class="panel">
+    <h2>Samples</h2>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div class="overlay-wrap"><canvas id="photo"></canvas></div>
+    <div class="legend" id="legend"></div>
+    <label class="toggle"><input type="checkbox" id="showOverlay" checked> Show bean overlay</label> <button class="btn ghost" id="zoom" aria-pressed="false">🔍 Zoom 2×</button>
+    <div id="beanInfo" class="beaninfo">Tap a bean to see its measurement.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Roast map</h2>
+    <p class="muted">Each dot is one bean: lightness L* (vertical, mapped to the Agtron-like scale on the right) against yellowness b*. Tap a dot to find the bean on the photo.</p>
+    <canvas id="map" class="chart"></canvas>
+  </section>
+
+  <section class="panel">
+    <h2>Distribution</h2>
+    <canvas id="hist" class="chart"></canvas>
+  </section>
+
+  <section class="panel">
+    <h2>Per-sample consistency</h2>
+    <div class="tablewrap"><table id="perSample"></table></div>
+    <p id="verdict"></p>
+  </section>
+
+  <section class="panel">
+    <h2>Outlier beans</h2>
+    <div id="outliers"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Export</h2>
+    <button class="btn" id="csv">Download CSV (one row per bean)</button>
+    <button class="btn" id="json">Download JSON report</button>
+  </section>
+</main>
+
+<section class="panel">
+  <details id="calib">
+    <summary><b>Calibration (important)</b> — the Agtron-like number is an estimate</summary>
+    <p>A phone photo measures surface colour under your light; an Agtron/Lighttells meter measures near-infrared reflectance of ground or whole beans. The default mapping is a <b>provisional linear guess</b>. To calibrate, photograph beans whose Agtron number you know (a roaster's reference lot, or beans you measured on a meter), read their mean L* here and enter two points:</p>
+    <div class="calgrid">
+      <label>Point 1 L* <input type="number" step="0.1" id="L1"></label>
+      <label>Agtron <input type="number" step="0.1" id="A1"></label>
+      <label>Point 2 L* <input type="number" step="0.1" id="L2"></label>
+      <label>Agtron <input type="number" step="0.1" id="A2"></label>
+    </div>
+    <button class="btn" id="saveCal">Apply</button> <button class="btn ghost" id="resetCal">Reset to provisional</button>
+    <p class="muted" id="calState"></p>
+  </details>
+  <details>
+    <summary><b>How it works</b></summary>
+    <ol class="muted">
+      <li>Plate: bright, neutral pixels → largest region → convex hull, shrunk to skip the rim.</li>
+      <li>White balance + flat-field: a plane is fitted to the plate's colour, so each bean is normalised to the white plate at its own position.</li>
+      <li>Beans: saturated-brown pixels plus dark-and-wide pixels (thin contact shadows are removed by a morphological opening).</li>
+      <li>Touching beans: markers from a distance transform blended with a blurred "bean body" map, then a marker-controlled watershed. Fragments are merged into neighbours, oversized blobs are split, crumbs and plate-edge pieces are rejected.</li>
+      <li>Colour: median CIELAB of each bean's interior, dropping the darkest 15% (centre crease) and brightest 8% (specular highlights).</li>
+      <li>Roast index: L* → Agtron-like number via your calibration; bands use SCA-style tile boundaries.</li>
+      <li>Outliers: robust z-score against the whole batch (median/MAD): quaker (very pale, low chroma), underdeveloped (pale), scorched (dark).</li>
+    </ol>
+  </details>
+  <p class="muted"><a href="https://github.com/NZA-93/roast-analyzer">Source on GitHub</a> · <a href="reports/2026-10-17.json">Reference report 2026-10-17 (JSON)</a></p>
+</section>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

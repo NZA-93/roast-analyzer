@@ -1,0 +1,30 @@
+# ☕ Roast Analyzer
+
+Bean-by-bean roast colour analysis from phone photos, 100% client-side.
+
+**Live app:** https://nza-93.github.io/roast-analyzer/ · **Demo batch:** https://nza-93.github.io/roast-analyzer/?demo
+
+Put roasted beans in one layer on a white plate, take a photo from above, and the app:
+
+1. finds the plate and uses it as the **white reference** (white balance + planar flat-field),
+2. segments every **individual bean**, including touching ones (distance transform + "bean body" markers + marker-controlled watershed, fragment merge / blob split), and rejects crumbs and plate-edge pieces,
+3. measures a **robust colour per bean**: median CIELAB of the bean interior, excluding the centre crease (darkest 15%) and specular highlights (brightest 8%),
+4. removes any **lighting gradient** across the photo (planar detrend of bean colour vs. position; beans are spread at random, so a trend is lighting),
+5. converts L* to an **Agtron-like roast index** (two-point calibration, see below) and SCA-style bands: Green/Yellow, Cinnamon, Light, City, City+, Full City, Vienna, French,
+6. shows a **roast map** (L* vs b*, band strips), **histogram**, mean / SD / uniformity, **outliers** (quakers, underdeveloped, scorched), a clickable **overlay** coloured by band,
+7. merges several photos into **one batch report** with per-sample stats and a sample-to-sample consistency check, and exports **CSV / JSON**.
+
+## Reference batch — 17 Oct 2026
+
+4 independent samples = 100% of the morning popper roast (`docs/demo/`, resized to 1600 px). Precomputed report: [`docs/reports/2026-10-17.json`](docs/reports/2026-10-17.json), summary in [`docs/reports/2026-10-17.md`](docs/reports/2026-10-17.md).
+
+## Calibration (read this)
+
+The Agtron-like number is **not** an Agtron reading. Default mapping is a provisional straight line (L* 45 → 65, L* 55 → 80). Calibrate with two lots of known Agtron value photographed with the same phone, plate and light; enter their mean L* in the Calibration panel (stored on your device). See [`docs/CRITIQUE.md`](docs/CRITIQUE.md) for the full calibration path and known limitations.
+
+## Code
+
+- `docs/js/analyzer.js` — the algorithm (pure JS, no dependencies; runs in browser and Node)
+- `docs/js/worker.js` — runs the analysis off the UI thread
+- `docs/js/app.js`, `docs/index.html`, `docs/css/style.css` — UI
+- `tools/run.mjs` — command-line batch run in Node (`cd tools && npm i && node run.mjs ../docs/demo/*.jpg`)
