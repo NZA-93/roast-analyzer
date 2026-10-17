@@ -171,14 +171,14 @@ async function finish() {
   // the photo toggle only exists once sending does (FEEDBACK_ENDPOINT set); in the on-device release it stays hidden
   const needsPhoto = !KNOWN_IMAGES.includes(s.sha256); $('photoToggle').hidden = !(needsPhoto && FEEDBACK_ENDPOINT); $('sendPhoto').checked = readJ(SENDPHOTO, true);
   const box = readJ(OUTBOX, []); box.push({ batch, sent: false, needsPhoto, photo: needsPhoto ? photoDataURL(s) : null }); try { localStorage.setItem(OUTBOX, JSON.stringify(box)); } catch { box.at(-1).photo = null; localStorage.setItem(OUTBOX, JSON.stringify(box)); }
-  $('doneMsg').textContent = FEEDBACK_ENDPOINT ? 'Saved ✓' : 'Saved on this device ✓'; // any upload runs in the background via the outbox; never blocks
+  $('doneMsg').textContent = FEEDBACK_ENDPOINT ? 'Saved ✓' : 'Saved on this device · use Export answers to share them'; // any upload runs in the background via the outbox; never blocks
   S.pendingSend = setTimeout(sendNow, 5000); // a moment to switch the photo toggle; leaving the screen sends at once (in the background)
 }
 function sendNow() { if (!S?.pendingSend) return; clearTimeout(S.pendingSend); S.pendingSend = null; uploadInBackground(); }
 async function uploadInBackground() {
   const done = $('doneMsg'); const ok = await flush(); const box = readJ(OUTBOX, []), left = box.filter(b => !b.sent).length, rej = box.find(b => !b.sent && b.rejected);
   if ($('done').hidden) return;
-  if (!FEEDBACK_ENDPOINT) return; // nothing is sent in this release; the message stays 'Saved on this device ✓'
+  if (!FEEDBACK_ENDPOINT) return; // nothing is sent in this release; the message stays 'Saved on this device · use Export answers…'
   done.textContent = ok && !left ? 'Saved ✓ · sent' : rej ? `Saved ✓ on this device · not sent: ${rej.rejected}` : `Saved ✓ · will send later (${left} waiting)`;
 }
 let flushing = null;
