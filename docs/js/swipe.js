@@ -54,7 +54,9 @@ function close() { clearTimeout(S?.chipTimer); if (S?.pendingSend) { clearTimeou
 function cardCanvas(k) {
   if (k >= S.cards.length) return null; if (S.cache.has(k)) return S.cache.get(k);
   const b = S.s.beans.find(q => q.id === S.cards[k].id), sib = siblingOf(b, S.s.beans, S.R);
-  const showSib = sib && (b.sizeRatio ?? 1) < 0.8; // ring the neighbouring fragment only when this detection looks like a piece
+  // outline the neighbour only for a likely split: this detection AND the neighbour are both clearly smaller than a typical
+  // bean and they touch. A whole neighbour next to a small bean is never outlined.
+  const showSib = sib && (b.sizeRatio ?? 1) < 0.7 && (sib.sizeRatio ?? 1) < 0.85 && Math.hypot(sib.x - b.x, sib.y - b.y) < 1.6 * S.R;
   const size = Math.min(window.innerWidth * 0.7, window.innerHeight * 0.55, 620);
   const c = { bean: b, sib, cv: renderCrop(S.s, b, showSib ? sib : null, size) }; S.cache.set(k, c); return c;
 }
@@ -175,7 +177,7 @@ function sendNow() { if (!S?.pendingSend) return; clearTimeout(S.pendingSend); S
 async function uploadInBackground() {
   const done = $('doneMsg'); const ok = await flush(); const box = readJ(OUTBOX, []), left = box.filter(b => !b.sent).length, rej = box.find(b => !b.sent && b.rejected);
   if ($('done').hidden) return;
-  done.textContent = ok && !left ? 'Saved ✓ · sent' : rej ? `Saved ✓ on this device · not sent: ${rej.rejected}` : `Saved ✓ · will send later (${left} waiting)`;
+  done.textContent = !FEEDBACK_ENDPOINT ? `Saved ✓ on this device (${left} saved) · use Export answers to share them` : ok && !left ? 'Saved ✓ · sent' : rej ? `Saved ✓ on this device · not sent: ${rej.rejected}` : `Saved ✓ · will send later (${left} waiting)`;
 }
 let flushing = null;
 export function flush() { return flushing ||= doFlush().finally(() => { flushing = null; }); }

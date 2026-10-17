@@ -30,12 +30,14 @@ function resizeTo(img, W, H) { if (img.width === W && img.height === H) return i
 
 // ---------- ground truth ----------
 const FB = FEEDBACK || P('feedback');
-// top-level feedback/*.json plus swipe-review files in feedback/swipe/*.json (raw batches in feedback/swipe/raw/ are not ground truth)
+// top-level feedback/*.json only. Swipe-review batches (feedback/swipe/, or any file with source.kind 'swipe-review') are NOT used
+// for tuning, gating or reported recall yet; that waits for the statistically sound scoring in the follow-up PR.
 const listJSON = d => fs.existsSync(d) ? fs.readdirSync(d).filter(f => f.endsWith('.json')).sort() : [];
-const gtFiles = [...listJSON(FB), ...listJSON(path.join(FB, 'swipe')).map(f => path.join('swipe', f))];
+const gtFiles = listJSON(FB);
 let skippedBiased = 0;
 const sets = [];
 for (const f of gtFiles) { const j = readJSON(path.join(FB, f)); if (!j || j.schema !== GT_SCHEMA) { console.warn(`skip ${f}: not a ground-truth file`); continue; }
+  if (j.source?.kind === 'swipe-review') { skippedBiased++; console.log(`skip ${f}: swipe-review answers are not used by the benchmark yet`); continue; }
   if (j.source?.biased) { skippedBiased++; console.log(`skip ${f}: biased (targeted swipe answers are for analysis, not tuning or gating)`); continue; }
   const file = imageIndex.get(j.image?.sha256) || (j.image?.path && fs.existsSync(P(j.image.path)) ? P(j.image.path) : null);
   if (!file) { console.warn(`skip ${f}: image ${j.image?.sha256?.slice(0, 12)} not found (add it to feedback/images/)`); continue; }

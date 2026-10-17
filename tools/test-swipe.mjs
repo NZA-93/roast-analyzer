@@ -19,7 +19,7 @@ const answers = [
 ];
 const batch = { schema: BATCH_SCHEMA, id: 'test-batch-1', createdAt: '2026-10-17T12:00:00+02:00', image, beanRadius: R, detectorVersion: ver, paramsHash: ph, params: {},
   answers, missed: [{ x: 380, y: 280 }, { x: 20, y: 280 }], missedScreenShown: true, detectionsOnPlate: 12,
-  colourPipelineVersion: 'wbplane-1+srgb-tone-1', wbGains: [1.1, 1, 0.9], gapTiles: [{ rect: [0, 0, 400, 300], gapArea: 1000, missed: 2 }], totalGapArea: 1000 };
+  colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1.1, 1, 0.9], gapTiles: [{ rect: [0, 0, 400, 300], gapArea: 1000, missed: 2 }], totalGapArea: 1000 };
 
 t('batch passes schema', () => assert.deepEqual(validateBatch(batch), []));
 
@@ -70,6 +70,11 @@ t('records carry raw L*/a*/b*, glare; schema refuses nulls; colour pipeline stor
   for (const k of ['rawL', 'rawA', 'rawB', 'glare']) assert.ok(validateBatch({ ...batch, answers: [{ ...a0, [k]: null }] }).includes('answers[0]'), k);
   assert.ok(validateBatch({ ...batch, wbGains: null }).length); assert.ok(validateBatch({ ...batch, colourPipelineVersion: undefined }).length);
   assert.equal(toGroundTruth(batch).source.colourPipelineVersion, 'wbplane-1+srgb-tone-1');
+  const src = toGroundTruth(batch).source; assert.equal(src.colorSpace, 'srgb'); assert.deepEqual(src.wbGains, [1.1, 1, 0.9]);
+  assert.ok(validateBatch((({ colorSpace, ...b }) => b)(batch)).includes('colorSpace')); assert.ok(validateBatch({ ...batch, colorSpace: 'display-p3-lies' }).includes('colorSpace'));
+  assert.deepEqual(validateBatch({ ...batch, colorSpace: 'display-p3' }), []);
+  const noGlare = makeRecord({ image, bean: { id: 99, x: 5, y: 5, L: 40, a: 1, b: 1 }, detectorVersion: ver, paramsHash: ph, answer: 'correct', pick: 'random', R });
+  assert.equal(noGlare.glare, undefined); assert.ok(validateBatch({ ...batch, answers: [noGlare] }).includes('answers[0]'), 'missing glare is rejected, not defaulted');
 });
 
 t('selection: 70% targeted / 30% random, tagged, most uncertain first', () => {

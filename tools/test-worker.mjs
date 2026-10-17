@@ -23,7 +23,7 @@ const env0 = () => ({ GITHUB_TOKEN: 'x', RATE: mkKV() });
 const ORIGIN = 'https://nza-93.github.io';
 const mk = (sha, extra = {}) => { const image = { name: 'a.jpg', sha256: sha, width: 100, height: 100 }, bean = { id: 1, x: 10, y: 10, L: 40, a: 8, b: 20, glare: 0 };
   return { schema: BATCH_SCHEMA, id: 'abcdef-123', createdAt: '2026-10-17T10:00:00Z', image, beanRadius: 5, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', params: {}, detectionsOnPlate: 50,
-    colourPipelineVersion: 'wbplane-1+srgb-tone-1', wbGains: [1, 1, 1], gapTiles: [{ rect: [0, 0, 50, 50], gapArea: 100, missed: 1 }], totalGapArea: 400,
+    colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1, 1, 1], gapTiles: [{ rect: [0, 0, 50, 50], gapArea: 100, missed: 1 }], totalGapArea: 400,
     answers: [makeRecord({ image, bean, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', answer: 'correct', pick: 'random', R: 5 })], missed: [{ x: 30, y: 30 }], ...extra }; };
 const post = (env, b, h = { origin: ORIGIN }) => worker.fetch(new Request('https://w.example/batch', { method: 'POST', headers: { 'cf-connecting-ip': '1.2.3.4', ...h }, body: typeof b === 'string' ? b : JSON.stringify(b) }), env);
 const known = KNOWN_IMAGES[0], unknown = 'e'.repeat(64);
