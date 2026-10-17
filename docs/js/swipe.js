@@ -157,7 +157,7 @@ async function finish() {
   const s = S.s, missed = S.tileMissed.flat();
   const batch = { schema: BATCH_SCHEMA, id: S.id, createdAt: new Date().toISOString(), image: { name: s.name, sha256: s.sha256, width: s.width, height: s.height, ...(s.demoPath ? { path: s.demoPath } : {}) },
     beanRadius: S.R, detectorVersion: S.version, paramsHash: S.phash, params: S.params, seed: S.seed, detectionsOnPlate: s.beans.length,
-    colourPipelineVersion: COLOUR_PIPELINE_VERSION, wbGains: s.params.wbGains || [1, 1, 1],
+    colourPipelineVersion: COLOUR_PIPELINE_VERSION, colorSpace: 'srgb', wbGains: s.params.wbGains || [1, 1, 1],
     answers: S.answers, missed, gapTiles: S.gap.tiles.map((g, i) => ({ rect: g.rect, gapArea: g.gapArea, missed: S.tileMissed[i].length })), totalGapArea: S.gap.total, missedScreenShown: !!S.missedScreenShown };
   const latest = new Map(); S.answers.forEach(a => latest.set(a.beanId, a));
   localStorage.setItem(REQUEUE(s.sha256), JSON.stringify([...latest.values()].filter(a => a.reason === 'unspecified').map(a => ({ id: a.beanId, pick: a.pick }))));
