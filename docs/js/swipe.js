@@ -1,10 +1,10 @@
 // Tinder-style bean review: one bean card at a time. Right = correct, left = wrong (+ one reason chip), up = skip.
-import { poolGapTiles, tileKey, rng, selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA, COLOUR_PIPELINE_VERSION, KNOWN_IMAGES } from './swipe-core.js';
+import { pooledRecall, rng, selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA, COLOUR_PIPELINE_VERSION, KNOWN_IMAGES } from './swipe-core.js';
 import { FEEDBACK_ENDPOINT, CARDS_PER_SESSION } from './config.js';
-import { plateRecall, recallText } from './evaluate.js';
+import { recallText } from './evaluate.js';
 
 const $ = id => document.getElementById(id);
-const POOL = sha => 'ra-swipe-pool:' + sha, OUTBOX = 'ra-swipe-outbox', SENDPHOTO = 'ra-swipe-send-photo', GAP_TILES = 4, REQUEUE = sha => 'ra-swipe-requeue:' + sha, SEEN = sha => 'ra-swipe-seen:' + sha;
+const OUTBOX = 'ra-swipe-outbox', SENDPHOTO = 'ra-swipe-send-photo', GAP_TILES = 4, REQUEUE = sha => 'ra-swipe-requeue:' + sha, SEEN = sha => 'ra-swipe-seen:' + sha;
 const CHIP_MS = 2000, LONG_MS = 450;
 let api, S = null, tintEl = null; // session
 const tint = () => (tintEl ||= document.getElementById('tint'));
@@ -111,34 +111,37 @@ function setupDrag() {
 }
 
 // ---------- gap tiles (missed beans -> FN with locations) ----------
-// The bean area (every tile of ~8 bean radii holding at least one detection, rim and sparse parts included) is split into
-// 3 density strata by detections per tile. GAP_TILES tiles are drawn at random within strata (at least one per stratum,
-// the rest in proportion to the stratum's gap area). Each tile stores its inclusion probability k/N, so the miss estimate
-// Σ taps/prob is unbiased. Gap area = pixels not covered by a detection.
-// exclude = tile keys already reviewed in earlier sessions on this photo: they are not re-picked, so pooled sessions form one
-// stratified sample without replacement (see poolGapTiles). Strata and N always describe the FULL grid.
-export function gapTiles(s, n = GAP_TILES, seed = 1, exclude = []) {
+// The plate area around the beans is cut into a fixed grid of tiles (~8 bean radii). Strata:
+//   'empty plate' = tiles with no detection inside the beans' bounding box (+1 tile margin) — misses hide there too;
+//   'sparse/rim', 'medium', 'dense' = tertiles of detections per tile.
+// Every session draws INDEPENDENTLY: GAP_TILES tiles, at least one per stratum, the rest in proportion to stratum gap area,
+// uniformly without replacement inside each stratum, so each tile's inclusion probability is exactly k/N (stored). Each
+// session's Σ missed/prob is unbiased; pooled sessions average those estimates (plateRecall). Gap area = pixels not
+// covered by a detection.
+export function gapTiles(s, n = GAP_TILES, seed = 1) {
   const R = s.params.beanRadius, T = Math.round(8 * R), lm = s.labelMap, w = s.width, all = [];
+  const bx0 = Math.min(...s.beans.map(b => b.x)) - T, by0 = Math.min(...s.beans.map(b => b.y)) - T, bx1 = Math.max(...s.beans.map(b => b.x)) + T, by1 = Math.max(...s.beans.map(b => b.y)) + T;
   for (let y0 = 0; y0 + T / 2 < s.height; y0 += T) for (let x0 = 0; x0 + T / 2 < w; x0 += T) {
-    const x1 = Math.min(w, x0 + T), y1 = Math.min(s.height, y0 + T);
-    const nDet = s.beans.filter(b => b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1).length; if (!nDet) continue;
+    const x1 = Math.min(w, x0 + T), y1 = Math.min(s.height, y0 + T), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const nDet = s.beans.filter(b => b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1).length;
+    if (!nDet && !(cx >= bx0 && cx <= bx1 && cy >= by0 && cy <= by1)) continue;   // far outside the beans: not plate we review
     let gap = 0; for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) if (!lm[y * w + x]) gap += 4;
     all.push({ rect: [x0, y0, x1, y1], gapArea: gap, nDet }); }
   const total = all.reduce((t, g) => t + g.gapArea, 0);
-  const ds = all.map(t => t.nDet).sort((a, b) => a - b), q1 = ds[Math.floor(ds.length / 3)] ?? 0, q2 = ds[Math.floor(2 * ds.length / 3)] ?? 0;
-  const strata = [['sparse/rim', t => t.nDet < q1], ['medium', t => t.nDet >= q1 && t.nDet < q2], ['dense', t => t.nDet >= q2]].map(([name, f]) => ({ name, tiles: all.filter(f) })).filter(st => st.tiles.length);
-  const ex = new Set(exclude), avail = strata.map(st => st.tiles.filter(t => !ex.has(tileKey(t.rect))));
-  const k = avail.map(a => a.length ? 1 : 0); let left = Math.max(0, n - k.reduce((a, b) => a + b, 0));
+  const occ = all.filter(t => t.nDet), ds = occ.map(t => t.nDet).sort((a, b) => a - b), q1 = ds[Math.floor(ds.length / 3)] ?? 0, q2 = ds[Math.floor(2 * ds.length / 3)] ?? 0;
+  const strata = [['empty plate', t => !t.nDet], ['sparse/rim', t => t.nDet && t.nDet < q1], ['medium', t => t.nDet && t.nDet >= q1 && t.nDet < q2], ['dense', t => t.nDet && t.nDet >= q2]]
+    .map(([name, f]) => ({ name, tiles: all.filter(f) })).filter(st => st.tiles.length);
+  const k = strata.map(() => 1).slice(0, n); while (k.length < strata.length) k.push(0); let left = Math.max(0, n - k.reduce((a, b) => a + b, 0));
   const ga = strata.map(st => st.tiles.reduce((t, g) => t + g.gapArea, 0));
-  while (left > 0) { let bi = -1, bv = -1; strata.forEach((st, i) => { if (k[i] >= avail[i].length) return; const v = ga[i] / (k[i] + 1); if (v > bv) { bv = v; bi = i; } }); if (bi < 0) break; k[bi]++; left--; }
+  while (left > 0) { let bi = -1, bv = -1; strata.forEach((st, i) => { if (k[i] >= st.tiles.length) return; const v = ga[i] / (k[i] + 1); if (v > bv) { bv = v; bi = i; } }); if (bi < 0) break; k[bi]++; left--; }
   const r = rng(seed), tiles = [];
-  strata.forEach((st, i) => { const pool = [...avail[i]]; for (let j = pool.length - 1; j > 0; j--) { const m = Math.floor(r() * (j + 1)); [pool[j], pool[m]] = [pool[m], pool[j]]; }
-    pool.slice(0, k[i]).forEach(({ nDet, ...t }) => tiles.push({ ...t, stratum: st.name, prob: +(k[i] / avail[i].length).toFixed(6) })); }); // prob conditional on earlier sessions
+  strata.forEach((st, i) => { const pool = [...st.tiles]; for (let j = pool.length - 1; j > 0; j--) { const m = Math.floor(r() * (j + 1)); [pool[j], pool[m]] = [pool[m], pool[j]]; }
+    pool.slice(0, k[i]).forEach(({ nDet, ...t }) => tiles.push({ ...t, stratum: st.name, prob: +(k[i] / st.tiles.length).toFixed(6) })); });
   for (let j = tiles.length - 1; j > 0; j--) { const m = Math.floor(r() * (j + 1)); [tiles[j], tiles[m]] = [tiles[m], tiles[j]]; }
-  return { total, tiles, selection: { method: 'stratified-random', seed, priorReviewed: ex.size, strata: strata.map((st, i) => ({ name: st.name, N: st.tiles.length, available: avail[i].length, k: k[i], minDet: Math.min(...st.tiles.map(t => t.nDet)), maxDet: Math.max(...st.tiles.map(t => t.nDet)) })) } };
+  return { total, tiles, selection: { method: 'stratified-random', seed, strata: strata.map((st, i) => ({ name: st.name, N: st.tiles.length, k: k[i], minDet: Math.min(...st.tiles.map(t => t.nDet)), maxDet: Math.max(...st.tiles.map(t => t.nDet)) })) } };
 }
 function gaps() {
-  if (!S.gap) { const prior = poolGapTiles(readJ(POOL(S.s.sha256), []).filter(x => x.paramsHash === S.phash)); S.gap = gapTiles(S.s, GAP_TILES, S.seed, prior?.reviewedKeys || []); S.gi = 0; S.tileMissed = S.gap.tiles.map(() => []); }
+  if (!S.gap) { S.gap = gapTiles(S.s, GAP_TILES, S.seed); S.gi = 0; S.tileMissed = S.gap.tiles.map(() => []); }
   if (S.gi >= S.gap.tiles.length) return finish();
   $('deck').hidden = true; $('swButtons').hidden = true; $('gaps').hidden = false; $('done').hidden = true;
   $('swProgress').textContent = `Missed any? ${S.gi + 1}/${S.gap.tiles.length}`; $('swBar').style.width = '100%'; $('swUndo').disabled = false;
@@ -179,18 +182,12 @@ async function finish() {
   if (!S.answers.length) { $('doneMsg').textContent = 'No answers to save.'; $('photoToggle').hidden = true; return; }
   const problems = validateBatch(batch); if (problems.length) { $('doneMsg').textContent = 'Could not save: ' + problems.join(', '); return; }
   // own photos must travel with the answers or they cannot be scored; demo photos are already in the repo
-  // pool this session's gap tiles + random answers with earlier sessions on the same photo/params; preview pooled recall
-  const pool = readJ(POOL(s.sha256), []).filter(x => x.paramsHash === S.phash);
-  pool.push({ paramsHash: S.phash, totalGapArea: S.gap.total, strata: S.gap.selection.strata.map(st => ({ name: st.name, N: st.N })),
-    tiles: batch.gapTiles.map(({ rect, gapArea, stratum, missed }) => ({ rect, gapArea, stratum, missed })),
-    random: [...latest.values()].filter(a => a.pick === 'random' && a.answer !== 'skip').map(a => [a.beanId, a.answer === 'correct' || a.reason === 'wrong-colour' || a.reason === 'two-beans' ? 1 : 0] /* same TP rule as toGroundTruth/score */) });
-  try { localStorage.setItem(POOL(s.sha256), JSON.stringify(pool.slice(-20))); } catch {}
-  const pooled = poolGapTiles(pool), rnd = new Map(pool.flatMap(x => x.random));
-  const rec = plateRecall({ tpRandom: [...rnd.values()].reduce((a, b) => a + b, 0), nRandom: rnd.size, detections: s.beans.length, tiles: pooled.tiles, totalGapArea: pooled.totalGapArea });
-  $('donePreview').textContent = `Preview, not scored · ${recallText(rec)} · ${pooled.sessions} session${pooled.sessions > 1 ? 's' : ''} on this photo`;
   // the photo toggle only exists once sending does (FEEDBACK_ENDPOINT set); in the on-device release it stays hidden
   const needsPhoto = !KNOWN_IMAGES.includes(s.sha256); $('photoToggle').hidden = !(needsPhoto && FEEDBACK_ENDPOINT); $('sendPhoto').checked = readJ(SENDPHOTO, true);
   const box = readJ(OUTBOX, []); box.push({ batch, sent: false, needsPhoto, photo: needsPhoto ? photoDataURL(s) : null }); try { localStorage.setItem(OUTBOX, JSON.stringify(box)); } catch { box.at(-1).photo = null; localStorage.setItem(OUTBOX, JSON.stringify(box)); }
+  // pooled preview over every saved batch on this photo (same detector version + params): not a scored number
+  const mine = readJ(OUTBOX, []).map(x => x.batch).filter(x => x.image.sha256 === s.sha256 && x.detectorVersion === S.version && x.paramsHash === S.phash);
+  const pr = pooledRecall(mine)[0]; $('donePreview').textContent = pr ? `Preview, not scored · ${recallText(pr)} · ${pr.batches} session${pr.batches > 1 ? 's' : ''} on this photo` : '';
   $('doneMsg').textContent = FEEDBACK_ENDPOINT ? 'Saved ✓' : 'Saved on this device · use Export answers to share them'; // any upload runs in the background via the outbox; never blocks
   S.pendingSend = setTimeout(sendNow, 5000); // a moment to switch the photo toggle; leaving the screen sends at once (in the background)
 }

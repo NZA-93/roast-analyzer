@@ -24,7 +24,7 @@ assert.match(plain, /swipe 6ecd408b1be6 \(1 session\): precision 1 \(n=10, 95% 0
 // tuning refuses a single photo
 const one = fs.mkdtempSync(path.join(os.tmpdir(), 'ra-one-')); fs.copyFileSync(path.join(dir, 'full-1.json'), path.join(one, 'full-1.json'));
 const r1 = run2({ RA_FEEDBACK: one }, '--tune', '--dry'); assert.equal(r1.code, 2); assert.match(r1.out, /REFUSING to tune: ground truth covers 1 photo/);
-assert.equal(run2({ RA_FEEDBACK: one }, '--ci', '--dry').code, 2);
+const c1 = run2({ RA_FEEDBACK: one }, '--ci', '--dry'); assert.equal(c1.code, 0); assert.match(c1.out, /gate only .* no tuning/); assert.doesNotMatch(c1.out, /better:/);
 // per-photo gate: history says sample1 used to score 1.0 and now (per a fake history entry) we pretend it was higher on another photo
 const fp = JSON.parse(plain.trim().split('\n').find(l => l.startsWith('{"dry"'))); const k1 = Object.keys(fp.perPhoto)[0];
 const hist = path.join(dir, 'history.json'); const fpr = /fingerprint (\w+)/.exec(plain)[1];
@@ -34,4 +34,4 @@ fs.writeFileSync(hist, JSON.stringify([{ date: 'x', version: '1.1.0', gtFingerpr
 assert.doesNotMatch(run2({ RA_FEEDBACK: dir, RA_HISTORY: hist }, '--dry').out, /REGRESSION/, '1.5-point drop is allowed');
 const tuned = run('--tune', '--dry'); const j = JSON.parse(tuned.trim().split('\n').find(l => l.startsWith('{"dry"')));
 assert.deepEqual(j.holdout, ['full-2.json']); assert.equal(j.skippedBiased, 2); assert.equal(j.holdoutF1, 1);
-console.log('benchmark tests passed (swipe reported via shared plateRecall, biased skipped, tune refuses <2 photos, per-photo 2-point gate, holdout)');
+console.log('benchmark tests passed (swipe reported via shared plateRecall, biased skipped, tune refuses <2 photos (--ci gate-only), per-photo 2-point gate, holdout)');

@@ -7,7 +7,6 @@ import fs from 'fs'; import path from 'path'; import crypto from 'crypto'; impor
 import jpeg from 'jpeg-js'; import { PNG } from 'pngjs';
 import { analyzeImage, ALGO_VERSION, TUNABLE } from '../docs/js/analyzer.js';
 import { score, loadTruth, GT_SCHEMA, plateRecall, recallText } from '../docs/js/evaluate.js';
-import { poolGapTiles } from '../docs/js/swipe-core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Set(process.argv.slice(2)); const TUNE = args.has('--tune') || args.has('--ci'), CI = args.has('--ci'), DRY = args.has('--dry');
@@ -20,6 +19,7 @@ const DEFAULTS = { bodySigma: 0.42, nmsRadius: 0.85, markerMin: 0.3, openK: 0.5,
 const BOUNDS = { bodySigma: [0.25, 0.8], nmsRadius: [0.5, 1.4], markerMin: [0.1, 0.6], openK: [0.25, 0.9], minBeanC: [0.3, 0.8], distW: [0, 4] };
 
 // ---------- images ----------
+// Same image bytes in several places: the first path found wins (docs/demo before feedback/images).
 const imageIndex = new Map();
 for (const dir of ['docs/demo', 'feedback/images']) { if (!fs.existsSync(P(dir))) continue;
   for (const f of fs.readdirSync(P(dir))) if (/\.(jpe?g|png)$/i.test(f)) { const buf = fs.readFileSync(P(dir, f)); imageIndex.set(crypto.createHash('sha256').update(buf).digest('hex'), P(dir, f)); } }
@@ -57,24 +57,27 @@ const photos = [...new Set(sets.map(s => s.gt.image.sha256))].sort();
 let holdoutPhotos = photos.length >= 2 ? photos.filter(h => parseInt(h.slice(0, 8), 16) % 4 === 0) : [];
 if (photos.length >= 2 && !holdoutPhotos.length) holdoutPhotos = [photos[0]];
 if (holdoutPhotos.length === photos.length) holdoutPhotos = holdoutPhotos.slice(0, -1);
-if (TUNE && photos.length < 2) { console.error(`REFUSING to tune: ground truth covers ${photos.length} photo(s); tuning needs at least 2 so one can be held out.`); process.exit(2); }
+let GATE_ONLY = false;
+if (TUNE && photos.length < 2) {
+  if (!CI) { console.error(`REFUSING to tune: ground truth covers ${photos.length} photo(s); tuning needs at least 2 so one can be held out.`); process.exit(2); }
+  GATE_ONLY = true; console.log(`--ci with ${photos.length} photo(s): gate only (regression + per-photo checks), no tuning — tuning needs ≥ 2 photos.`); }
 const trainSets = sets.filter(s => !holdoutPhotos.includes(s.gt.image.sha256)), holdSets = sets.filter(s => holdoutPhotos.includes(s.gt.image.sha256));
 console.log(`photos: ${photos.length} · holdout: ${holdSets.length ? holdSets.map(s => s.name).join(', ') : 'none (needs ≥ 2 photos; gate uses all ground truth)'} · skipped biased: ${skippedBiased}`);
 
-// Swipe-review files, pooled per photo + detector params (sessions on the same photo add up): precision on the reviewed
-// random cards; whole-plate recall from the shared plateRecall() over the pooled gap tiles (poolGapTiles: deduped, pooled
-// inclusion probabilities), with taps re-checked against the new detections. null + plain reason when evidence is thin.
+// Swipe-review files, pooled per photo + detector version + params hash (several sessions on one photo add up): precision on
+// the reviewed random cards (pooled for Wilson); whole-plate recall from the shared plateRecall(): coverage = union of
+// distinct tiles, misses = mean of the per-session HT estimates, taps re-checked against the new detections.
+// Duplicates: if the same batch appears twice, the first file (alphabetical) wins.
 function scoreSwipeGroup(group, params) {
-  const r = analyzeImage(group[0].img, params), R = r.params.beanRadius; let tp = 0, n = 0; const sessions = [];
-  for (const s of group) { const added = s.gt.corrections?.added || [], isAdded = p => added.some(a => a.x === p.x && a.y === p.y);
+  const r = analyzeImage(group[0].img, params), R = r.params.beanRadius; let tp = 0, n = 0; const sessions = [], ids = new Set();
+  for (const s of group) { if (ids.has(s.gt.source.batchId)) continue; ids.add(s.gt.source.batchId);
+    const added = s.gt.corrections?.added || [], isAdded = p => added.some(a => a.x === p.x && a.y === p.y);
     const roi = { points: s.gt.roi.points.filter(q => !added.some(a => a.x === q[0] && a.y === q[1])), r: s.gt.roi.r };
     const sc = score(s.truth.filter(t => !isAdded(t)), r.beans, R, roi); tp += sc.tp; n += sc.detected;
     const still = a => !r.beans.some(d => (d.x - a.x) ** 2 + (d.y - a.y) ** 2 <= R * R);
-    sessions.push({ paramsHash: s.gt.source.paramsHash, totalGapArea: s.gt.source.totalGapArea, strata: (s.gt.source.gapSelection?.strata || []).map(st => ({ name: st.name, N: st.N })),
-      tiles: (s.gt.source.gapTiles || []).map(g => ({ ...g, missed: added.filter(a => a.x >= g.rect[0] && a.x < g.rect[2] && a.y >= g.rect[1] && a.y < g.rect[3] && still(a)).length })) }); }
-  const pooled = poolGapTiles(sessions);
-  const rec = plateRecall({ tpRandom: tp, nRandom: n, detections: r.beans.length, tiles: pooled?.tiles || [], totalGapArea: pooled?.totalGapArea ?? 0 });
-  return { photo: group[0].gt.image.sha256.slice(0, 12), files: group.map(s => s.name), sessions: pooled?.sessions || 0, reviewed: n, precision: n ? Math.round(tp / n * 1e4) / 1e4 : null, ...rec, text: recallText(rec) };
+    sessions.push({ totalGapArea: s.gt.source.totalGapArea, tiles: (s.gt.source.gapTiles || []).map(g => ({ ...g, missed: added.filter(a => a.x >= g.rect[0] && a.x < g.rect[2] && a.y >= g.rect[1] && a.y < g.rect[3] && still(a)).length })) }); }
+  const rec = plateRecall({ tpRandom: tp, nRandom: n, detections: r.beans.length, sessions });
+  return { photo: group[0].gt.image.sha256.slice(0, 12), files: group.map(s => s.name), reviewed: n, precision: n ? Math.round(tp / n * 1e4) / 1e4 : null, ...rec, text: recallText(rec) };
 }
 function evaluate(params, list = sets) {
   let tp = 0, fp = 0, fn = 0, ce = 0, nce = 0, bn = 0, bok = 0; const per = [];
@@ -111,7 +114,7 @@ else if (last && baseGate.f1 < lastGate - REGRESSION_TOL) regression = `${holdSe
 
 const trainBase = holdSets.length ? evaluate(curParams, trainSets) : base;
 let best = { params: curParams, m: trainBase }, changed = false, note = 'no change';
-if (TUNE) {
+if (TUNE && !GATE_ONLY) {
   const cands = k => { const v = best.params[k]; const [lo, hi] = BOUNDS[k]; return [...new Set([v * 0.8, v * 0.9, v * 1.1, v * 1.25].map(x => +Math.min(hi, Math.max(lo, x)).toFixed(3)))].filter(x => x !== v); };
   for (let round = 0; round < 2; round++) for (const k of TUNABLE) for (const v of cands(k)) {
     const p = { ...best.params, [k]: v }; const m = evaluate(p, trainSets);
@@ -134,7 +137,7 @@ const algoChanged = `${maj}.${min}` !== ALGO_VERSION;
 const version = algoChanged ? `${ALGO_VERSION}.0` : changed ? `${maj}.${min}.${patch + 1}` : prevV;
 const today = new Date().toISOString().slice(0, 10);
 const { per, ...summary } = ship.m; if (holdSets.length) summary.holdoutF1 = evaluate(ship.params, holdSets).f1; summary.perPhoto = perPhoto(ship.m);
-const groups = new Map(); for (const s of swipeSets) { const k = `${s.gt.image.sha256}|${s.gt.source.paramsHash}`; (groups.get(k) || groups.set(k, []).get(k)).push(s); }
+const groups = new Map(); for (const s of swipeSets) { const k = `${s.gt.image.sha256}|${s.gt.detectorVersion}|${s.gt.source.paramsHash}`; (groups.get(k) || groups.set(k, []).get(k)).push(s); }
 const swipeReport = [...groups.values()].map(g => scoreSwipeGroup(g, ship.params));
 for (const w of swipeReport) console.log(`swipe ${w.photo} (${w.sessions} session${w.sessions === 1 ? '' : 's'}): precision ${w.precision ?? 'n/a'} (n=${w.nRandom}${w.precisionCI ? `, 95% ${w.precisionCI[0]}–${w.precisionCI[1]}` : ''}) · ${w.text}${w.reason ? ' — ' + w.reason : ''}`);
 const out = { version, algoVersion: ALGO_VERSION, date: changed || !current ? today : current.date, params: ship.params, benchmark: { ...summary, gtFingerprint: fingerprint, perImage: per }, ...(swipeReport.length ? { swipeReport } : {}), note };

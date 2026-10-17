@@ -114,28 +114,26 @@ export function scoreBatch(batch, detections) {
     const roi = { points: gt.roi.points.filter(q => !(batch.missed || []).some(m => m.x === q[0] && m.y === q[1])), r: gt.roi.r };
     const m = score(loadTruth(gt).filter(t => !(batch.missed || []).some(mm => mm.x === t.x && mm.y === t.y)), detections, batch.beanRadius, roi);
     out[sub] = { tp: m.tp, fp: m.fp, fn: m.fn, precision: m.detected ? m.precision : null, reviewed: m.detected, countError: null }; }
-  const rec = plateRecall({ tpRandom: out.random.tp, nRandom: out.random.reviewed, detections: D, tiles: batch.gapTiles, totalGapArea: batch.totalGapArea });
+  const rec = plateRecall({ tpRandom: out.random.tp, nRandom: out.random.reviewed, detections: D, sessions: [{ tiles: batch.gapTiles || [], totalGapArea: batch.totalGapArea }] });
   for (const sub of ['random', 'targeted', 'all']) out[sub].recall = rec.recall;
   out.recall = rec; out.missesEstimated = rec.missesEstimated; out.reviewedShare = rec.share;
   return out;
 }
 
-// Pool gap-tile reviews from several sessions on the SAME photo + detector params. Tiles come from a fixed grid, so they are
-// deduped by rectangle (the later review wins). Each session drew uniformly from the stratum's not-yet-reviewed tiles, so
-// the union is a stratified simple random sample of K_s distinct tiles out of N_s, and the pooled inclusion probability of
-// every reviewed tile is K_s / N_s (allocation never depends on what was tapped). Sessions whose grid/strata differ from the
-// latest one (other params) are dropped. sessions: [{ paramsHash, totalGapArea, strata:[{name,N}], tiles:[{rect,gapArea,stratum,missed,missedPts?}] }]
+// Group sessions for pooling: same image sha256 + detector version + params hash, and the same tile grid/strata.
+// Duplicates: if two batches carry the same batch id, the first one wins (later copies are ignored).
 export const tileKey = r => r.join(',');
-export function poolGapTiles(sessions) {
-  const ok = (sessions || []).filter(x => x && Array.isArray(x.tiles) && Array.isArray(x.strata)); if (!ok.length) return null;
-  const ref = ok[ok.length - 1], sig = x => `${x.paramsHash}|${x.totalGapArea}|${x.strata.map(st => st.name + ':' + st.N).join(';')}`;
-  const same = ok.filter(x => sig(x) === sig(ref)), byKey = new Map();
-  for (const x of same) for (const t of x.tiles) byKey.set(tileKey(t.rect), { ...t });
-  const N = Object.fromEntries(ref.strata.map(st => [st.name, st.N])), K = {};
-  for (const t of byKey.values()) K[t.stratum] = (K[t.stratum] || 0) + 1;
-  const tiles = [...byKey.values()].map(t => ({ ...t, prob: +(K[t.stratum] / N[t.stratum]).toFixed(6) }));
-  return { tiles, totalGapArea: ref.totalGapArea, strata: ref.strata.map(st => ({ ...st, K: K[st.name] || 0 })), sessions: same.length, dropped: ok.length - same.length, reviewedKeys: [...byKey.keys()] };
+export function poolKey(b) { return `${b.image?.sha256 ?? b.imageSha256}|${b.detectorVersion}|${b.paramsHash}`; }
+export function poolSessions(batches) {
+  const seen = new Set(), groups = new Map();
+  for (const b of batches || []) { if (!b || seen.has(b.id)) continue; seen.add(b.id); const k = poolKey(b); (groups.get(k) || groups.set(k, []).get(k)).push(b); }
+  return [...groups.entries()].map(([key, bs]) => { const sig = x => `${x.totalGapArea}|${(x.gapSelection?.strata || []).map(st => st.name + ':' + st.N).join(';')}`, ref = sig(bs[bs.length - 1]);
+    const use = bs.filter(x => sig(x) === ref), rnd = new Map();
+    for (const x of use) for (const a of latestAnswers(x.answers || [])) if (a.pick === 'random' && a.answer !== 'skip') rnd.set(a.beanId, a.answer === 'correct' || a.reason === 'wrong-colour' || a.reason === 'two-beans' ? 1 : 0);
+    return { key, batches: use.length, dropped: bs.length - use.length, detections: use[use.length - 1].detectionsOnPlate,
+      tpRandom: [...rnd.values()].reduce((a, b) => a + b, 0), nRandom: rnd.size, sessions: use.map(x => ({ tiles: x.gapTiles || [], totalGapArea: x.totalGapArea })) }; });
 }
+export function pooledRecall(batches) { return poolSessions(batches).map(g => ({ key: g.key, batches: g.batches, ...plateRecall({ tpRandom: g.tpRandom, nRandom: g.nRandom, detections: g.detections, sessions: g.sessions }) })); }
 
 // Server-side + client-side schema check. Returns [] when valid, else a list of problems.
 export function validateBatch(b) {
@@ -162,6 +160,11 @@ export function validateBatch(b) {
   if (!isNum(b.totalGapArea) || b.totalGapArea < 0 || !Array.isArray(b.gapTiles) || b.gapTiles.length > LIMITS.maxTiles
     || b.gapTiles.some(g => !Array.isArray(g?.rect) || g.rect.length !== 4 || !g.rect.every(isNum) || !isNum(g.gapArea) || g.gapArea < 0 || !(isNum(g.prob) && g.prob > 0 && g.prob <= 1) || !Number.isInteger(g.missed) || g.missed < 0)) e.push('gapTiles');
   if (b.gapTiles?.length && (!b.gapSelection || b.gapSelection.method !== 'stratified-random' || !Array.isArray(b.gapSelection.strata))) e.push('gapSelection');
+  else if (b.gapTiles?.length) { // design check: per stratum exactly k tiles, k <= N, and every tile's prob == k/N
+    const st = new Map(b.gapSelection.strata.map(x => [x.name, x]));
+    const bad = b.gapSelection.strata.some(x => !Number.isInteger(x.N) || !Number.isInteger(x.k) || x.k < 0 || x.k > x.N || b.gapTiles.filter(t => t.stratum === x.name).length !== x.k)
+      || b.gapTiles.some(t => { const x = st.get(t.stratum); return !x || Math.abs(t.prob - x.k / x.N) > 1e-5; });
+    if (bad) e.push('gapSelection: prob must equal k/N per stratum'); }
   if (Array.isArray(b.gapTiles) && Array.isArray(b.missed) && b.gapTiles.reduce((t, g) => t + (g.missed | 0), 0) !== b.missed.length) e.push('missed vs gapTiles');
   if (b.photo != null && (typeof b.photo !== 'string' || !/^data:image\/(jpeg|png);base64,/.test(b.photo) || b.photo.length > LIMITS.maxPhotoBytes)) e.push('photo');
   if (b.photo != null && !(Number.isInteger(b.image?.originalWidth) && Number.isInteger(b.image?.originalHeight) && isNum(b.image?.scale) && b.image.scale > 0 && b.image.scale <= 1)) e.push('image.scale');
