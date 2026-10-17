@@ -60,3 +60,35 @@ export function loadTruth(file) {
   if (!file || file.schema !== GT_SCHEMA || !Array.isArray(file.truth)) throw new Error('Not a roast-analyzer ground-truth file');
   return file.truth.map(t => Array.isArray(t) ? { x: t[0], y: t[1], band: t[2]?.band, bandChecked: !!t[2]?.band, group: t[2]?.group } : { ...t, bandChecked: !!t.band });
 }
+
+// ---------- whole-plate recall from a partial (swipe) review — ONE implementation, used by swipe-core and the benchmark ----------
+export const RECALL_MIN_RANDOM = 10;     // random cards needed before precision (and so recall) is quoted
+export const RECALL_MIN_SHARE = 0.2;     // share of the plate's gap area the gap tiles must cover
+// Wilson score interval for k successes out of n.
+export function wilson(k, n, z = 1.96) {
+  if (!n) return [0, 1]; const p = k / n, d = 1 + z * z / n, c = p + z * z / (2 * n), h = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n));
+  return [Math.max(0, (c - h) / d), Math.min(1, (c + h) / d)];
+}
+// tpRandom/nRandom: correct answers among the RANDOM cards (targeted cards are never used: they are biased).
+// detections: all detections on the plate. tiles: reviewed gap tiles [{missed, prob, gapArea}], prob = inclusion probability
+// of that tile under the stored selection design, so misses = Σ missed/prob (Horvitz–Thompson, unbiased).
+// totalGapArea: gap area of the whole plate. Returns recall = null with a reason when the evidence is too thin.
+export function plateRecall({ tpRandom, nRandom, detections, tiles, totalGapArea }) {
+  const r4 = v => Math.round(v * 1e4) / 1e4;
+  const rev = (tiles || []).reduce((t, g) => t + (g.gapArea || 0), 0);
+  const share = totalGapArea > 0 ? Math.min(1, rev / totalGapArea) : null;
+  const out = { recall: null, ci: null, confidence: 'low', nRandom: nRandom | 0, share: share == null ? null : r4(share), missesEstimated: null, precisionRandom: nRandom ? r4(tpRandom / nRandom) : null, precisionCI: nRandom ? wilson(tpRandom, nRandom).map(r4) : null };
+  const why = [];
+  if (!(nRandom >= RECALL_MIN_RANDOM)) why.push(`only ${nRandom | 0} random cards (need ${RECALL_MIN_RANDOM})`);
+  if (share == null) why.push('no gap area measured');
+  else if (share < RECALL_MIN_SHARE) why.push(`gap tiles cover ${(share * 100).toFixed(1)}% of the gap area (need ${RECALL_MIN_SHARE * 100}%)`);
+  if ((tiles || []).some(g => !(g.prob > 0 && g.prob <= 1))) why.push('tile inclusion probabilities missing');
+  if (why.length) { out.reason = why.join('; '); return out; }
+  const taps = tiles.reduce((t, g) => t + (g.missed || 0), 0), miss = tiles.reduce((t, g) => t + (g.missed || 0) / g.prob, 0);
+  const scale = taps ? miss / taps : 1 / share;                       // average expansion factor
+  const tapLo = Math.max(0, taps - 1.96 * Math.sqrt(taps)), tapHi = taps + 1.96 * Math.sqrt(taps + 1) + 1; // approx. Poisson bounds
+  const [pLo, pHi] = wilson(tpRandom, nRandom), P = tpRandom / nRandom;
+  const rec = (p, m) => { const tp = detections * p; return tp + m > 0 ? tp / (tp + m) : 1; };
+  out.missesEstimated = r4(miss); out.recall = r4(rec(P, miss)); out.ci = [r4(rec(pLo, tapHi * scale)), r4(rec(pHi, tapLo * scale))]; out.confidence = 'ok';
+  return out;
+}

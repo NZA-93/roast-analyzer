@@ -1,5 +1,5 @@
 // Tinder-style bean review: one bean card at a time. Right = correct, left = wrong (+ one reason chip), up = skip.
-import { selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA, COLOUR_PIPELINE_VERSION, KNOWN_IMAGES } from './swipe-core.js';
+import { rng, selectCards, siblingOf, makeRecord, validateBatch, paramsHash, BATCH_SCHEMA, COLOUR_PIPELINE_VERSION, KNOWN_IMAGES } from './swipe-core.js';
 import { FEEDBACK_ENDPOINT, CARDS_PER_SESSION } from './config.js';
 
 const $ = id => document.getElementById(id);
@@ -110,24 +110,31 @@ function setupDrag() {
 }
 
 // ---------- gap tiles (missed beans -> FN with locations) ----------
-// The pile is cut into tiles of ~8 bean radii. Gap area = pixels inside the pile's tiles not covered by a detection.
-// The GAP_TILES tiles with the most gap area are shown one per screen; the rest of the gap area is unreviewed and the
-// miss estimate is scaled by the reviewed share (reviewedShare in swipe-core).
-export function gapTiles(s, n = GAP_TILES) {
-  const R = s.params.beanRadius, T = Math.round(8 * R), lm = s.labelMap, w = s.width, tiles = [];
+// The bean area (every tile of ~8 bean radii holding at least one detection, rim and sparse parts included) is split into
+// 3 density strata by detections per tile. GAP_TILES tiles are drawn at random within strata (at least one per stratum,
+// the rest in proportion to the stratum's gap area). Each tile stores its inclusion probability k/N, so the miss estimate
+// Σ taps/prob is unbiased. Gap area = pixels not covered by a detection.
+export function gapTiles(s, n = GAP_TILES, seed = 1) {
+  const R = s.params.beanRadius, T = Math.round(8 * R), lm = s.labelMap, w = s.width, all = [];
   for (let y0 = 0; y0 + T / 2 < s.height; y0 += T) for (let x0 = 0; x0 + T / 2 < w; x0 += T) {
     const x1 = Math.min(w, x0 + T), y1 = Math.min(s.height, y0 + T);
-    const nDet = s.beans.filter(b => b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1).length; if (nDet < 3) continue; // outside the pile
+    const nDet = s.beans.filter(b => b.x >= x0 && b.x < x1 && b.y >= y0 && b.y < y1).length; if (!nDet) continue;
     let gap = 0; for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) if (!lm[y * w + x]) gap += 4;
-    tiles.push({ rect: [x0, y0, x1, y1], gapArea: gap, nDet }); }
-  // keep tiles inside the pile (at least the median bean density) so empty plate at the rim doesn't win
-  const dens = tiles.map(t => t.nDet).sort((a, b) => a - b), medD = dens[dens.length >> 1] || 0;
-  tiles.splice(0, tiles.length, ...tiles.filter(t => t.nDet >= medD).map(({ nDet, ...t }) => t));
-  const total = tiles.reduce((t, g) => t + g.gapArea, 0);
-  return { total, tiles: [...tiles].sort((a, b) => b.gapArea - a.gapArea).slice(0, n) };
+    all.push({ rect: [x0, y0, x1, y1], gapArea: gap, nDet }); }
+  const total = all.reduce((t, g) => t + g.gapArea, 0);
+  const ds = all.map(t => t.nDet).sort((a, b) => a - b), q1 = ds[Math.floor(ds.length / 3)] ?? 0, q2 = ds[Math.floor(2 * ds.length / 3)] ?? 0;
+  const strata = [['sparse/rim', t => t.nDet < q1], ['medium', t => t.nDet >= q1 && t.nDet < q2], ['dense', t => t.nDet >= q2]].map(([name, f]) => ({ name, tiles: all.filter(f) })).filter(st => st.tiles.length);
+  const k = strata.map(() => 1); let left = Math.max(0, n - strata.length);
+  const ga = strata.map(st => st.tiles.reduce((t, g) => t + g.gapArea, 0));
+  while (left > 0) { let bi = -1, bv = -1; strata.forEach((st, i) => { if (k[i] >= st.tiles.length) return; const v = ga[i] / (k[i] + 1); if (v > bv) { bv = v; bi = i; } }); if (bi < 0) break; k[bi]++; left--; }
+  const r = rng(seed), tiles = [];
+  strata.forEach((st, i) => { const pool = [...st.tiles]; for (let j = pool.length - 1; j > 0; j--) { const m = Math.floor(r() * (j + 1)); [pool[j], pool[m]] = [pool[m], pool[j]]; }
+    pool.slice(0, k[i]).forEach(({ nDet, ...t }) => tiles.push({ ...t, stratum: st.name, prob: +(k[i] / st.tiles.length).toFixed(6) })); });
+  for (let j = tiles.length - 1; j > 0; j--) { const m = Math.floor(r() * (j + 1)); [tiles[j], tiles[m]] = [tiles[m], tiles[j]]; }
+  return { total, tiles, selection: { method: 'stratified-random', seed, strata: strata.map((st, i) => ({ name: st.name, N: st.tiles.length, k: k[i], minDet: Math.min(...st.tiles.map(t => t.nDet)), maxDet: Math.max(...st.tiles.map(t => t.nDet)) })) } };
 }
 function gaps() {
-  if (!S.gap) { S.gap = gapTiles(S.s); S.gi = 0; S.tileMissed = S.gap.tiles.map(() => []); }
+  if (!S.gap) { S.gap = gapTiles(S.s, GAP_TILES, S.seed); S.gi = 0; S.tileMissed = S.gap.tiles.map(() => []); }
   if (S.gi >= S.gap.tiles.length) return finish();
   $('deck').hidden = true; $('swButtons').hidden = true; $('gaps').hidden = false; $('done').hidden = true;
   $('swProgress').textContent = `Missed any? ${S.gi + 1}/${S.gap.tiles.length}`; $('swBar').style.width = '100%'; $('swUndo').disabled = false;
@@ -157,10 +164,10 @@ function nextTile() { S.gi++; gaps(); }
 function photoDataURL(s) { for (const q of [0.85, 0.7, 0.55]) { const u = s.canvas.toDataURL('image/jpeg', q); if (u.length < 1.4e6) return u; } return null; }
 async function finish() {
   const s = S.s, missed = S.tileMissed.flat();
-  const batch = { schema: BATCH_SCHEMA, id: S.id, createdAt: new Date().toISOString(), image: { name: s.name, sha256: s.sha256, width: s.width, height: s.height, ...(s.demoPath ? { path: s.demoPath } : {}) },
+  const batch = { schema: BATCH_SCHEMA, id: S.id, createdAt: new Date().toISOString(), image: { name: s.name, sha256: s.sha256, width: s.width, height: s.height, originalWidth: s.origWidth || s.width, originalHeight: s.origHeight || s.height, scale: +(s.width / (s.origWidth || s.width)).toFixed(6), ...(s.demoPath ? { path: s.demoPath } : {}) },
     beanRadius: S.R, detectorVersion: S.version, paramsHash: S.phash, params: S.params, seed: S.seed, detectionsOnPlate: s.beans.length,
     colourPipelineVersion: COLOUR_PIPELINE_VERSION, colorSpace: 'srgb', wbGains: s.params.wbGains || [1, 1, 1],
-    answers: S.answers, missed, gapTiles: S.gap.tiles.map((g, i) => ({ rect: g.rect, gapArea: g.gapArea, missed: S.tileMissed[i].length })), totalGapArea: S.gap.total, missedScreenShown: !!S.missedScreenShown };
+    answers: S.answers, missed, gapTiles: S.gap.tiles.map((g, i) => ({ rect: g.rect, gapArea: g.gapArea, stratum: g.stratum, prob: g.prob, missed: S.tileMissed[i].length })), totalGapArea: S.gap.total, gapSelection: S.gap.selection, missedScreenShown: !!S.missedScreenShown };
   const latest = new Map(); S.answers.forEach(a => latest.set(a.beanId, a));
   localStorage.setItem(REQUEUE(s.sha256), JSON.stringify([...latest.values()].filter(a => a.reason === 'unspecified').map(a => ({ id: a.beanId, pick: a.pick }))));
   localStorage.setItem(SEEN(s.sha256), JSON.stringify([...new Set([...readJ(SEEN(s.sha256), []), ...latest.keys()])]));

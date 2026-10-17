@@ -2,6 +2,7 @@
 import assert from 'assert/strict';
 import worker, { MAX_PER_HOUR } from '../worker/index.js';
 import { makeRecord, BATCH_SCHEMA, KNOWN_IMAGES } from '../docs/js/swipe-core.js';
+import jpeg from 'jpeg-js'; import { PNG } from 'pngjs'; import crypto from 'crypto';
 let n = 0; const t = async (name, fn) => { await fn(); n++; console.log('ok -', name); };
 
 // --- fake GitHub: refs, contents, pulls ---
@@ -21,12 +22,13 @@ globalThis.fetch = async (url, init = {}) => {
 const mkKV = () => { const kv = new Map(); return { get: async k => kv.get(k), put: async (k, v) => kv.set(k, v) }; };
 const env0 = () => ({ GITHUB_TOKEN: 'x', RATE: mkKV() });
 const ORIGIN = 'https://nza-93.github.io';
-const mk = (sha, extra = {}) => { const image = { name: 'a.jpg', sha256: sha, width: 100, height: 100 }, bean = { id: 1, x: 10, y: 10, L: 40, a: 8, b: 20, glare: 0 };
+const mk = (sha, extra = {}) => { const image = { name: 'a.jpg', sha256: sha, width: 400, height: 300, originalWidth: 4032, originalHeight: 3024, scale: +(400 / 4032).toFixed(6) }, bean = { id: 1, x: 10, y: 10, L: 40, a: 8, b: 20, glare: 0 };
   return { schema: BATCH_SCHEMA, id: 'abcdef-123', createdAt: '2026-10-17T10:00:00Z', image, beanRadius: 5, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', params: {}, detectionsOnPlate: 50,
-    colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1, 1, 1], gapTiles: [{ rect: [0, 0, 50, 50], gapArea: 100, missed: 1 }], totalGapArea: 400,
+    colourPipelineVersion: 'wbplane-1+srgb-tone-1', colorSpace: 'srgb', wbGains: [1, 1, 1], gapTiles: [{ rect: [0, 0, 50, 50], gapArea: 100, stratum: 'dense', prob: 0.5, missed: 1 }], totalGapArea: 400, gapSelection: { method: 'stratified-random', seed: 1, strata: [{ name: 'dense', N: 2, k: 1 }] },
     answers: [makeRecord({ image, bean, detectorVersion: '1.1.0', paramsHash: 'abcdef123456', answer: 'correct', pick: 'random', R: 5 })], missed: [{ x: 30, y: 30 }], ...extra }; };
 const post = (env, b, h = { origin: ORIGIN }) => worker.fetch(new Request('https://w.example/batch', { method: 'POST', headers: { 'cf-connecting-ip': '1.2.3.4', ...h }, body: typeof b === 'string' ? b : JSON.stringify(b) }), env);
 const known = KNOWN_IMAGES[0], unknown = 'e'.repeat(64);
+const realJpeg = (w, h) => 'data:image/jpeg;base64,' + Buffer.from(jpeg.encode({ width: w, height: h, data: Buffer.alloc(w * h * 4, 180) }, 80).data).toString('base64');
 
 await t('valid batch on a known photo -> branch + files under feedback/swipe/ + PR (never main)', async () => { resetGH(); const env = env0();
   const r = await post(env, mk(known)); const j = await r.json(); assert.equal(r.status, 201, JSON.stringify(j));
@@ -40,10 +42,19 @@ await t('rate limit is mandatory and enforced', async () => { resetGH();
   const env = env0(); for (let i = 0; i < MAX_PER_HOUR; i++) await post(env, { junk: 1 }); assert.equal((await post(env, mk(known))).status, 429); });
 await t('unknown photo without image -> 422 with a clear message', async () => { resetGH(); const r = await post(env0(), mk(unknown)); assert.equal(r.status, 422); assert.match((await r.json()).detail, /send it with the answers/); });
 await t('unknown photo with image -> photo stored, GT points at it', async () => { resetGH();
-  const r = await post(env0(), mk(unknown, { photo: 'data:image/jpeg;base64,' + Buffer.from('fakejpeg').toString('base64') })); const j = await r.json(); assert.equal(r.status, 201);
+  const r = await post(env0(), mk(unknown, { photo: realJpeg(400, 300) })); const j = await r.json(); assert.equal(r.status, 201, JSON.stringify(j));
   const img = j.files.find(f => f.startsWith('feedback/images/')); assert.ok(img);
   const gt = JSON.parse(Buffer.from(gh.files[`swipe-feedback:${j.files.find(f => f.endsWith('-random.json'))}`], 'base64').toString()); assert.equal(gt.image.path, img);
-  const raw = JSON.parse(Buffer.from(gh.files[`swipe-feedback:${j.files.find(f => f.includes('/raw/'))}`], 'base64').toString()); assert.equal(raw.photo, undefined, 'photo not duplicated in raw JSON'); });
+  const raw = JSON.parse(Buffer.from(gh.files[`swipe-feedback:${j.files.find(f => f.includes('/raw/'))}`], 'base64').toString()); assert.equal(raw.photo, undefined, 'photo not duplicated in raw JSON');
+  assert.equal(raw.image.originalSha256, unknown); assert.equal(raw.image.uploadedSha256, crypto.createHash('sha256').update(Buffer.from(realJpeg(400, 300).split(',')[1], 'base64')).digest('hex'));
+  assert.equal(raw.image.scale, +(400 / 4032).toFixed(6)); assert.equal(gt.image.uploadedSha256, raw.image.uploadedSha256); });
+await t('photo bytes validated: garbage, truncated, wrong size, tiny -> 422, nothing committed; PNG accepted', async () => {
+  for (const [photo, re] of [['data:image/jpeg;base64,' + Buffer.from('not a jpeg').toString('base64'), /not a JPEG or PNG/], [realJpeg(400, 300).slice(0, -40), /truncated|broken/],
+    [realJpeg(640, 480), /answers were made on 400×300/], [realJpeg(100, 75), /out of range/]]) { resetGH();
+    const r = await post(env0(), mk(unknown, { photo })); assert.equal(r.status, 422); assert.match((await r.json()).detail, re); assert.equal(Object.keys(gh.files).length, 0); }
+  resetGH(); const png = new PNG({ width: 400, height: 300 }); png.data.fill(200); const pu = 'data:image/png;base64,' + PNG.sync.write(png).toString('base64');
+  const r = await post(env0(), mk(unknown, { photo: pu })); assert.equal(r.status, 201); assert.ok((await r.json()).files.some(f => f.endsWith('.png'))); });
+await t('photo without original size/scale fails schema', async () => { resetGH(); const b = mk(unknown, { photo: realJpeg(400, 300) }); delete b.image.scale; assert.equal((await post(env0(), b)).status, 400); });
 await t('dedupe by content hash (same answers, new id) -> 409', async () => { resetGH(); const env = env0();
   assert.equal((await post(env, mk(known))).status, 201); assert.equal((await post(env, mk(known, { id: 'resent-copy', createdAt: '2026-10-17T10:00:09Z' }))).status, 409); });
 await t('schema, nulls and size are rejected', async () => { resetGH();

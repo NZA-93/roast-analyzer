@@ -32,7 +32,7 @@ async function loadBitmap(src) {
   const cw = Math.round(bmp.width * sc), ch = Math.round(bmp.height * sc);
   const c = document.createElement('canvas'); c.width = cw; c.height = ch; const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0, cw, ch);
-  return { canvas: c, imageData: ctx.getImageData(0, 0, cw, ch), sha256 };
+  return { canvas: c, imageData: ctx.getImageData(0, 0, cw, ch), sha256, origWidth: bmp.width, origHeight: bmp.height };
 }
 
 async function addSources(list) {
@@ -41,9 +41,9 @@ async function addSources(list) {
     const { src, name } = list[k];
     status(`Analysing ${name} (${k + 1}/${list.length})…`);
     try {
-      const { canvas, imageData, sha256 } = await loadBitmap(src);
+      const { canvas, imageData, sha256, origWidth, origHeight } = await loadBitmap(src);
       await detectorReady; const r = await analyzeInWorker(imageData);
-      r.name = name; r.canvas = canvas; r.sha256 = sha256; r.demoPath = typeof src === 'string' ? 'docs/' + src : null; state.samples.push(r);
+      r.name = name; r.canvas = canvas; r.sha256 = sha256; r.origWidth = origWidth; r.origHeight = origHeight; r.demoPath = typeof src === 'string' ? 'docs/' + src : null; state.samples.push(r);
     } catch (e) { status(`${name}: ${e.message}`, 'warn'); await new Promise(r => setTimeout(r, 1500)); }
   }
   recompute(); state.current = Math.max(0, state.samples.length - 1);

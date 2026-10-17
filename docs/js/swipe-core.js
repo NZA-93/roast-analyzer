@@ -1,7 +1,7 @@
 // Swipe review: pure logic shared by the page (docs/js/swipe.js), the Cloudflare Worker (worker/) and the tests.
 // No DOM here. A "batch" is what one review session produces; toGroundTruth() turns it into the existing
 // roast-analyzer/ground-truth@1 files that tools/benchmark.mjs and score() already read.
-import { GT_SCHEMA, makeGroundTruthFile, emptyCorrections, loadTruth, score } from './evaluate.js';
+import { GT_SCHEMA, makeGroundTruthFile, emptyCorrections, loadTruth, score, plateRecall } from './evaluate.js';
 
 export const BATCH_SCHEMA = 'roast-analyzer/swipe-batch@1';
 export const ANSWERS = ['correct', 'wrong', 'skip'];
@@ -87,35 +87,36 @@ export function toGroundTruth(batch, subset = 'all') {
     note: `Swipe review ${batch.id} (${subset}): ${ans.length} answers, ${(batch.missed || []).length} missed-bean taps. Scope = reviewed beans only.` });
   gt.createdAt = batch.createdAt || gt.createdAt;
   gt.source = { kind: 'swipe-review', batchId: batch.id, subset, paramsHash: batch.paramsHash, biased: subset === 'targeted', missedScreenShown: !!batch.missedScreenShown,
-    detectionsOnPlate: batch.detectionsOnPlate, reviewedShare: reviewedShare(batch), colourPipelineVersion: batch.colourPipelineVersion, colorSpace: batch.colorSpace, wbGains: batch.wbGains };
+    detectionsOnPlate: batch.detectionsOnPlate, reviewedShare: reviewedShare(batch), gapTiles: batch.gapTiles, totalGapArea: batch.totalGapArea, gapSelection: batch.gapSelection, colourPipelineVersion: batch.colourPipelineVersion, colorSpace: batch.colorSpace, wbGains: batch.wbGains };
   if (batch.photoPath) gt.image = { ...gt.image, path: batch.photoPath };
   gt.colourFlags = colourFlags; // never used as band labels (no `band` corrections are produced here)
   gt.excluded = excluded;
   return gt;
 }
 
-// Share of the plate's gap area (uncovered plate between detections) that the gaps tiles showed.
+// Share of the plate's gap area that the gap tiles showed. Zero/unknown gap area -> null (never 1).
 export function reviewedShare(batch) {
   const tot = batch.totalGapArea, rev = (batch.gapTiles || []).reduce((t, g) => t + (g.gapArea || 0), 0);
-  return tot > 0 ? Math.min(1, rev / tot) : (batch.missedScreenShown ? 1 : 0);
+  return tot > 0 ? Math.min(1, rev / tot) : null;
 }
-// Misses on the whole plate, estimated from the taps in the reviewed tiles.
-export function estimatedMisses(batch) { const sh = reviewedShare(batch); return sh > 0 ? (batch.missed || []).length / sh : null; }
+// Horvitz–Thompson estimate of misses on the whole plate from the taps in the sampled tiles (null without a valid design).
+export function estimatedMisses(batch) {
+  const t = batch.gapTiles || []; if (!t.length || t.some(g => !(g.prob > 0 && g.prob <= 1))) return null;
+  return t.reduce((s, g) => s + (g.missed || 0) / g.prob, 0);
+}
 
-// Score a batch, separately per subset. A swipe batch covers only some beans, so:
-//  precision = from the reviewed cards (Critic: quote the 'random' one),
-//  recall    = TP_est / (TP_est + misses_est) over the WHOLE plate, TP_est = detectionsOnPlate × precision(random),
-//  count error is not computed (a partial batch cannot measure it).
+// Score a batch, separately per subset. Precision per subset from the reviewed cards. Recall over the whole plate comes
+// from plateRecall() (shared with the benchmark): random cards only, null + reason when n or gap share is too small,
+// with a Wilson-based interval. Count error is not computed for partial batches.
 export function scoreBatch(batch, detections) {
-  const out = {}; const D = batch.detectionsOnPlate ?? detections.length, miss = estimatedMisses(batch);
+  const out = {}; const D = batch.detectionsOnPlate ?? detections.length;
   for (const sub of ['random', 'targeted', 'all']) { const gt = toGroundTruth(batch, sub);
-    const noMiss = { ...gt, truth: gt.truth, roi: { points: gt.roi.points.filter(q => !(batch.missed || []).some(m => m.x === q[0] && m.y === q[1])), r: gt.roi.r } };
-    const m = score(loadTruth(gt).filter(t => !(batch.missed || []).some(mm => mm.x === t.x && mm.y === t.y)), detections, batch.beanRadius, noMiss.roi);
-    out[sub] = { tp: m.tp, fp: m.fp, fn: m.fn, precision: m.precision, reviewed: m.detected, countError: null }; }
-  const P = out.random.reviewed ? out.random.precision : out.all.precision;
-  const tpEst = D * P; const recall = miss == null ? null : +(tpEst / Math.max(1e-9, tpEst + miss)).toFixed(4);
-  for (const sub of ['random', 'targeted', 'all']) { out[sub].recall = recall; out[sub].f1 = recall == null ? null : +(2 * out[sub].precision * recall / Math.max(1e-9, out[sub].precision + recall)).toFixed(4); }
-  out.missesEstimated = miss == null ? null : +miss.toFixed(2); out.reviewedShare = +reviewedShare(batch).toFixed(4);
+    const roi = { points: gt.roi.points.filter(q => !(batch.missed || []).some(m => m.x === q[0] && m.y === q[1])), r: gt.roi.r };
+    const m = score(loadTruth(gt).filter(t => !(batch.missed || []).some(mm => mm.x === t.x && mm.y === t.y)), detections, batch.beanRadius, roi);
+    out[sub] = { tp: m.tp, fp: m.fp, fn: m.fn, precision: m.detected ? m.precision : null, reviewed: m.detected, countError: null }; }
+  const rec = plateRecall({ tpRandom: out.random.tp, nRandom: out.random.reviewed, detections: D, tiles: batch.gapTiles, totalGapArea: batch.totalGapArea });
+  for (const sub of ['random', 'targeted', 'all']) out[sub].recall = rec.recall;
+  out.recall = rec; out.missesEstimated = rec.missesEstimated; out.reviewedShare = rec.share;
   return out;
 }
 
@@ -142,8 +143,11 @@ export function validateBatch(b) {
   if (!COLOR_SPACES.includes(b.colorSpace)) e.push('colorSpace');
   if (typeof b.colourPipelineVersion !== 'string' || !Array.isArray(b.wbGains) || b.wbGains.length !== 3 || !b.wbGains.every(isNum)) e.push('colour pipeline');
   if (!isNum(b.totalGapArea) || b.totalGapArea < 0 || !Array.isArray(b.gapTiles) || b.gapTiles.length > LIMITS.maxTiles
-    || b.gapTiles.some(g => !Array.isArray(g?.rect) || g.rect.length !== 4 || !g.rect.every(isNum) || !isNum(g.gapArea) || g.gapArea < 0)) e.push('gapTiles');
-  if (b.photo != null && (typeof b.photo !== 'string' || !b.photo.startsWith('data:image/jpeg;base64,') || b.photo.length > LIMITS.maxPhotoBytes)) e.push('photo');
+    || b.gapTiles.some(g => !Array.isArray(g?.rect) || g.rect.length !== 4 || !g.rect.every(isNum) || !isNum(g.gapArea) || g.gapArea < 0 || !(isNum(g.prob) && g.prob > 0 && g.prob <= 1) || !Number.isInteger(g.missed) || g.missed < 0)) e.push('gapTiles');
+  if (b.gapTiles?.length && (!b.gapSelection || b.gapSelection.method !== 'stratified-random' || !Array.isArray(b.gapSelection.strata))) e.push('gapSelection');
+  if (Array.isArray(b.gapTiles) && Array.isArray(b.missed) && b.gapTiles.reduce((t, g) => t + (g.missed | 0), 0) !== b.missed.length) e.push('missed vs gapTiles');
+  if (b.photo != null && (typeof b.photo !== 'string' || !/^data:image\/(jpeg|png);base64,/.test(b.photo) || b.photo.length > LIMITS.maxPhotoBytes)) e.push('photo');
+  if (b.photo != null && !(Number.isInteger(b.image?.originalWidth) && Number.isInteger(b.image?.originalHeight) && isNum(b.image?.scale) && b.image.scale > 0 && b.image.scale <= 1)) e.push('image.scale');
   return e;
 }
 // Canonical content hash of a batch's answers (dedupe: the same answers sent twice are one batch).
